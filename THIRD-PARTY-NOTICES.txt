@@ -1,0 +1,76 @@
+THIRD-PARTY NOTICES
+===================
+
+CodeBrix.Develop incorporates code and components from the following
+open-source projects. All incorporated code is permissively licensed.
+
+--------------------------------------------------------------------------------
+MonoDevelop
+https://github.com/mono/monodevelop
+License: MIT/X11 (per-file headers)
+Copyright (c) Novell, Inc., Xamarin Inc., Microsoft Corporation, and
+MonoDevelop contributors
+
+Individual source files adapted from MonoDevelop retain their original
+MIT/X11 license headers and authorship credits, and carry a
+"//was previously: <upstream-namespace>" comment on the namespace line.
+Only files bearing MIT/X11 headers are adapted; LGPL-covered portions of
+the MonoDevelop repository are not used.
+
+Adapted files (kept current as porting proceeds):
+  src/CodeBrix.Develop.Core/FilePath.cs
+      was MonoDevelop.Core/FilePath.cs (c) 2011 Novell, Inc.
+  src/CodeBrix.Develop.Core/Projects/BuildError.cs
+      was MonoDevelop.Projects/BuildError.cs (c) 2015 Xamarin Inc.
+  src/CodeBrix.Develop.Core/Projects/MSBuildErrorParser.cs
+      was MonoDevelop.Projects/MSBuildErrorParser.cs (c) 2014 Xamarin Inc.
+
+MonoDevelop IMAGE ASSETS (icons and other artwork):
+Image asset files taken from the MonoDevelop repository carry no per-file
+license marking; the repository's top-level COPYING file is the GNU Lesser
+General Public License, version 2.1 (LGPL 2.1). Accordingly:
+
+  * All image asset files from the MonoDevelop project are assumed to
+    carry the LGPL 2.1 license, and are only used in this application
+    UNMODIFIED. They are redistributed as-is, in their original file
+    format, and their "source" is the image file itself.
+  * If this project needs an image that differs from a MonoDevelop
+    original, a new asset is created from scratch (not derived from any
+    MonoDevelop image) and licensed under this repository's MIT license.
+  * The LGPL 2.1 applies only to those image files themselves; it does
+    not extend to this application's code, which remains MIT licensed.
+  * A copy of the LGPL 2.1 license text accompanies the image assets:
+    src/CodeBrix.Develop.Ide/Assets/MonoDevelopIcons/COPYING (the
+    MonoDevelop repository's own COPYING file, also unmodified).
+  * Imported so far (all byte-identical to upstream): the icon sets of
+    main/src/core/MonoDevelop.Ide/icons,
+    main/src/addins/MonoDevelop.Debugger/icons, and
+    main/src/addins/MonoDevelop.SourceEditor2/icons, excluding the
+    ~contrast and ~sel variants (exclusion of files is selection, not
+    modification).
+  * Assets from the MonoDevelop.TextEditor.Cocoa add-in (including all
+    "vs-*" images and other Visual Studio-branded artwork) are EXCLUDED:
+    none of them may be imported into this project or repository.
+
+--------------------------------------------------------------------------------
+Roslyn (.NET Compiler Platform) — Microsoft.CodeAnalysis.* NuGet packages
+https://github.com/dotnet/roslyn
+License: MIT
+Copyright (c) .NET Foundation and Contributors
+
+--------------------------------------------------------------------------------
+Microsoft.Build.Locator — NuGet package
+https://github.com/microsoft/MSBuildLocator
+License: MIT
+Copyright (c) Microsoft Corporation
+
+--------------------------------------------------------------------------------
+CodeBrix.Develop.UI — NuGet package (GTK 4 / GtkSourceView 5 binding)
+https://github.com/ellisnet/CodeBrix.Develop.UI
+License: MIT
+Copyright (c) 2026 Jeremy Ellis and contributors
+Copyright (c) 2020 Gir-Core (upstream gir.core project)
+
+GTK 4 and GtkSourceView 5 themselves are LGPL-licensed NATIVE system
+libraries, dynamically loaded at run time and never redistributed by
+this application.

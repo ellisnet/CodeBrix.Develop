@@ -1,0 +1,31 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <TargetFramework>net10.0</TargetFramework>
+    <!-- SITUATIONAL EXCEPTION (documented): this project keeps
+         <Nullable>enable</Nullable> because it builds directly against the
+         CodeBrix.Develop.UI binding (NRT-annotated API surface) and its
+         GObject-subclass Roslyn source generator, which emits
+         nullable-enabled code (same rationale as CodeBrix.Develop.UI
+         itself). CodeBrix.Develop.Core stays NRT-off per family convention. -->
+    <Nullable>enable</Nullable>
+    <!-- The GObject subclass source generator emits unsafe code. -->
+    <AllowUnsafeBlocks>true</AllowUnsafeBlocks>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <PackageReference Include="CodeBrix.Develop.UI" Version="1.0.187.116" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <!-- MonoDevelop icon assets: assumed LGPL 2.1, used UNMODIFIED only
+         (see THIRD-PARTY-NOTICES.txt; the LGPL text is the COPYING file
+         beside the images). Looked up at run time by ImageService. -->
+    <EmbeddedResource Include="Assets\MonoDevelopIcons\*.png" LogicalName="icons/%(Filename)%(Extension)" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <ProjectReference Include="..\CodeBrix.Develop.Core\CodeBrix.Develop.Core.csproj" />
+  </ItemGroup>
+
+</Project>

@@ -1,0 +1,18 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <TargetFramework>net10.0</TargetFramework>
+    <OutputType>Exe</OutputType>
+    <RootNamespace>CodeBrix.Develop</RootNamespace>
+    <AssemblyName>CodeBrix.Develop</AssemblyName>
+    <Nullable>enable</Nullable>
+    <!-- Linux x64 only for now; the RID keeps restore/publish honest about it. -->
+    <RuntimeIdentifiers>linux-x64</RuntimeIdentifiers>
+    <InvariantGlobalization>false</InvariantGlobalization>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <ProjectReference Include="..\CodeBrix.Develop.Ide\CodeBrix.Develop.Ide.csproj" />
+  </ItemGroup>
+
+</Project>
