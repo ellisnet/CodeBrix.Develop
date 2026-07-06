@@ -15,4 +15,20 @@
     <ProjectReference Include="..\CodeBrix.Develop.Ide\CodeBrix.Develop.Ide.csproj" />
   </ItemGroup>
 
+  <!--
+    NetCoreDbg debugger engine, delivered as native binaries (copied into this
+    app's output under netcoredbg/). The package is a single-arch carrier with
+    no managed assembly, so exactly one is referenced, selected by the host
+    SDK's architecture ($(NETCoreSdkRuntimeIdentifier)): linux-arm64 pulls the
+    Arm64 package, linux-x64 pulls the X64 package. This keys off the HOST arch
+    (correct for the same-machine build+debug workflow); a cross-arch
+    "dotnet publish -r <other>" would still get the host-arch debugger.
+  -->
+  <ItemGroup Condition="'$(NETCoreSdkRuntimeIdentifier)' == 'linux-x64'">
+    <PackageReference Include="CodeBrix.Develop.Debug.LinuxX64" Version="3.0.187.134" />
+  </ItemGroup>
+  <ItemGroup Condition="'$(NETCoreSdkRuntimeIdentifier)' == 'linux-arm64'">
+    <PackageReference Include="CodeBrix.Develop.Debug.LinuxArm64" Version="3.0.187.976" />
+  </ItemGroup>
+
 </Project>

@@ -1,7 +1,7 @@
 # CodeBrix.Develop
 
 An integrated development environment for building CodeBrix.Platform
-applications, running on Linux x64.
+applications, running on Linux (x64 and arm64).
 
 CodeBrix.Develop is inspired by — and architected like — the
 [MonoDevelop](https://github.com/mono/monodevelop) IDE, rebuilt for
@@ -17,7 +17,7 @@ Built on:
 
 - **CodeBrix.Develop.UI** — GTK 4 + GtkSourceView 5 bindings for .NET 10
 - **Microsoft.CodeAnalysis (Roslyn)** — C# language services (workspaces, completion)
-- **CodeBrix.Develop.Debug.LinuxX64** — the NetCoreDbg debugger engine (planned)
+- **CodeBrix.Develop.Debug.LinuxX64** / **CodeBrix.Develop.Debug.LinuxArm64** — the NetCoreDbg debugger engine; the app references whichever matches the host architecture
 
 Code adapted from MonoDevelop retains its MIT/X11 license headers and carries
 a `//was previously:` note on the namespace line. See THIRD-PARTY-NOTICES.txt.
