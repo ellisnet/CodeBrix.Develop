@@ -53,6 +53,35 @@ General Public License, version 2.1 (LGPL 2.1). Accordingly:
     none of them may be imported into this project or repository.
 
 --------------------------------------------------------------------------------
+Visual Studio Code — color theme definition files
+https://github.com/microsoft/vscode
+License: MIT
+Copyright (c) Microsoft Corporation
+
+The color theme JSON files in src/CodeBrix.Develop.Ide/Assets/VSCodeThemes/
+are taken unmodified from the microsoft/vscode repository (the built-in
+theme-defaults, theme-monokai, theme-monokai-dimmed, theme-solarized-dark,
+theme-solarized-light, theme-abyss, theme-quietlight, theme-red,
+theme-tomorrow-night-blue, and theme-kimbie-dark extensions). They are
+embedded as resources and translated at run time into GTK CSS and
+GtkSourceView style schemes. A copy of the repository's MIT license
+accompanies the files (Assets/VSCodeThemes/LICENSE.txt). Some themes are
+in turn derived from classic TextMate themes (e.g. Monokai by Wimer
+Hazenberg, Solarized by Ethan Schoonover); their provenance is documented
+in the microsoft/vscode repository.
+
+--------------------------------------------------------------------------------
+CodeBrix.Sqlite.ApacheLicenseForever — NuGet package
+https://github.com/ellisnet/CodeBrix.Sqlite
+License: Apache-2.0
+Copyright 2014-2018 Ellisnet - Jeremy Ellis.
+Copyright (c) 2026 Jeremy Ellis and contributors.
+
+Used for the options.sqlite settings store. Depends on Microsoft.Data.Sqlite
+(MIT, Copyright (c) .NET Foundation and Contributors) and the bundled
+SQLitePCLRaw native SQLite library (public domain / Apache-2.0 wrapper).
+
+--------------------------------------------------------------------------------
 Roslyn (.NET Compiler Platform) — Microsoft.CodeAnalysis.* NuGet packages
 https://github.com/dotnet/roslyn
 License: MIT

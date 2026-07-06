@@ -89,11 +89,16 @@ public class EditorDocument
 
     void ApplyStyleScheme()
     {
-        var manager = GtkSource.StyleSchemeManager.GetDefault();
-        var scheme = manager.GetScheme(WorkbenchTheme.PrefersDark ? "Adwaita-dark" : "Adwaita");
+        // The current color theme's generated scheme, with the stock
+        // Adwaita schemes as a safety net.
+        var scheme = Themes.ThemeService.GetEditorScheme()
+            ?? GtkSource.StyleSchemeManager.GetDefault().GetScheme(WorkbenchTheme.PrefersDark ? "Adwaita-dark" : "Adwaita");
         if (scheme != null)
             buffer.SetStyleScheme(scheme);
     }
+
+    /// <summary>Re-applies the current color theme's editor scheme.</summary>
+    public void RefreshStyleScheme() => ApplyStyleScheme();
 
     /// <summary>Gives keyboard focus to the editor.</summary>
     public void Focus() => view.GrabFocus();

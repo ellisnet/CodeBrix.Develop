@@ -110,4 +110,11 @@ public class DocumentManager
         foreach (var document in documents)
             document.Save();
     }
+
+    /// <summary>Re-applies the current editor style scheme to all open documents.</summary>
+    public void RefreshStyleSchemes()
+    {
+        foreach (var document in documents)
+            document.RefreshStyleScheme();
+    }
 }

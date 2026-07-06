@@ -35,6 +35,7 @@ public class OutputPad
         scrolled.SetChild(textView);
         scrolled.SetHexpand(true);
         scrolled.SetVexpand(true);
+        scrolled.AddCssClass("cb-output");
     }
 
     /// <summary>The widget to place in the workbench.</summary>

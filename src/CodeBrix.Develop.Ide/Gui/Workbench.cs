@@ -10,11 +10,14 @@
 using System;
 using System.Threading;
 using System.Threading.Tasks;
+using System.Collections.Generic;
 using CodeBrix.Develop.Core;
 using CodeBrix.Develop.Core.Projects;
 using CodeBrix.Develop.Core.TypeSystem;
 using CodeBrix.Develop.Ide.Gui.Documents;
+using CodeBrix.Develop.Ide.Gui.Options;
 using CodeBrix.Develop.Ide.Gui.Pads;
+using CodeBrix.Develop.Ide.Themes;
 using Gio = CodeBrix.Develop.UI.Gio;
 using Gtk = CodeBrix.Develop.UI.Gtk;
 
@@ -35,6 +38,10 @@ public class Workbench
     readonly Gtk.Notebook bottomNotebook;
     readonly Gtk.Label statusLabel;
 
+    readonly Gtk.Paned verticalSplit;
+    readonly Gtk.Paned horizontalSplit;
+    readonly List<(Gtk.Button Button, string IconName)> toolbarButtons = new();
+
     readonly BuildService buildService = new BuildService();
     readonly BuildService runService = new BuildService();
     readonly SynchronizationContext uiContext;
@@ -53,7 +60,9 @@ public class Workbench
 
         window = Gtk.ApplicationWindow.New(app);
         window.Title = "CodeBrix Develop";
-        window.SetDefaultSize(1360, 880);
+        window.SetDefaultSize(IdePreferences.WorkbenchWidth, IdePreferences.WorkbenchHeight);
+        if (IdePreferences.WorkbenchMaximized)
+            window.Maximize();
         ImageService.HiDpi = window.GetScaleFactor() > 1;
 
         solutionPad = new SolutionPad();
@@ -71,24 +80,25 @@ public class Workbench
         buildService.OutputReceived += line => uiContext.Post(_ => buildOutput.AppendLine(line), null);
         runService.OutputReceived += line => uiContext.Post(_ => applicationOutput.AppendLine(line), null);
 
-        var verticalSplit = Gtk.Paned.New(Gtk.Orientation.Vertical);
+        verticalSplit = Gtk.Paned.New(Gtk.Orientation.Vertical);
         verticalSplit.SetStartChild(documentManager.Widget);
         verticalSplit.SetEndChild(bottomNotebook);
         verticalSplit.SetResizeStartChild(true);
         verticalSplit.SetShrinkStartChild(false);
-        verticalSplit.SetPosition(600);
+        verticalSplit.SetPosition(IdePreferences.OutputPanePosition);
 
-        var horizontalSplit = Gtk.Paned.New(Gtk.Orientation.Horizontal);
+        horizontalSplit = Gtk.Paned.New(Gtk.Orientation.Horizontal);
         horizontalSplit.SetStartChild(solutionPad.Widget);
         horizontalSplit.SetEndChild(verticalSplit);
         horizontalSplit.SetResizeStartChild(false);
         horizontalSplit.SetShrinkStartChild(false);
-        horizontalSplit.SetPosition(300);
+        horizontalSplit.SetPosition(IdePreferences.SolutionPanePosition);
         horizontalSplit.SetHexpand(true);
         horizontalSplit.SetVexpand(true);
 
         statusLabel = Gtk.Label.New("Ready");
         statusLabel.SetXalign(0);
+        statusLabel.AddCssClass("cb-statusbar");
         statusLabel.SetMarginStart(8);
         statusLabel.SetMarginTop(3);
         statusLabel.SetMarginBottom(3);
@@ -104,6 +114,43 @@ public class Workbench
         InstallActions();
         application.SetMenubar(BuildMenubarModel());
         window.SetShowMenubar(true);
+
+        // Everything remembered about the UI goes to options.sqlite on the
+        // way out (the portable-configuration principle).
+        window.OnCloseRequest += (_, _) =>
+        {
+            documentManager.SaveAll();
+            SaveUiState();
+            return false;
+        };
+
+        ThemeService.ThemeChanged += OnThemeChanged;
+    }
+
+    void OnThemeChanged()
+    {
+        // Icon variants (~dark) follow the theme: reload the toolbar and
+        // Solution-pad icons, and restyle the open editors.
+        foreach (var (button, iconName) in toolbarButtons)
+            button.SetChild(ImageService.CreateImage(iconName));
+        solutionPad.RefreshIcons();
+        documentManager.RefreshStyleSchemes();
+    }
+
+    void SaveUiState()
+    {
+        IdePreferences.WorkbenchMaximized.Value = window.IsMaximized();
+        if (!window.IsMaximized())
+        {
+            window.GetDefaultSize(out var width, out var height);
+            if (width > 0 && height > 0)
+            {
+                IdePreferences.WorkbenchWidth.Value = width;
+                IdePreferences.WorkbenchHeight.Value = height;
+            }
+        }
+        IdePreferences.SolutionPanePosition.Value = horizontalSplit.Position;
+        IdePreferences.OutputPanePosition.Value = verticalSplit.Position;
     }
 
     Gtk.Widget BuildToolbar()
@@ -122,7 +169,7 @@ public class Workbench
         return toolbar;
     }
 
-    static Gtk.Button ToolButton(string iconName, string actionName, string tooltip)
+    Gtk.Button ToolButton(string iconName, string actionName, string tooltip)
     {
         var button = Gtk.Button.New();
         button.SetChild(ImageService.CreateImage(iconName));
@@ -130,6 +177,7 @@ public class Workbench
         button.SetActionName(actionName);
         button.SetTooltipText(tooltip);
         button.SetHasFrame(false);
+        toolbarButtons.Add((button, iconName));
         return button;
     }
 
@@ -159,7 +207,8 @@ public class Workbench
             if (documentManager.ActiveDocument is { } document)
                 documentManager.CloseDocument(document);
         }, "<Control>w");
-        AddAction("quit", () => { documentManager.SaveAll(); application.Quit(); }, "<Control>q");
+        AddAction("options", ShowOptions, "<Control>comma");
+        AddAction("quit", () => { documentManager.SaveAll(); SaveUiState(); application.Quit(); }, "<Control>q");
 
         buildAction = AddAction("build", () => _ = BuildAsync(rebuild: false), "<Control><Shift>b", enabled: false);
         rebuildAction = AddAction("rebuild", () => _ = BuildAsync(rebuild: true), null, enabled: false);
@@ -200,6 +249,7 @@ public class Workbench
         fileMenu.Append("_Save", "app.save");
         fileMenu.Append("Save _All", "app.save-all");
         fileMenu.Append("_Close File", "app.close-file");
+        fileMenu.Append("Op_tions…", "app.options");
         fileMenu.Append("_Quit", "app.quit");
 
         var editMenu = Gio.Menu.New();
@@ -366,6 +416,12 @@ public class Workbench
         }
     }
 
+    void ShowOptions()
+    {
+        var dialog = new OptionsDialog(window, IdeOptionsSections.Build());
+        dialog.Present();
+    }
+
     void ShowAbout()
     {
         var about = Gtk.AboutDialog.New();
@@ -380,16 +436,13 @@ public class Workbench
     }
 }
 
-/// <summary>Small helpers for matching the ambient GTK theme.</summary>
+/// <summary>Small helpers for matching the application theme.</summary>
 public static class WorkbenchTheme
 {
-    /// <summary>Best-effort detection of a dark ambient theme.</summary>
-    public static bool PrefersDark
-    {
-        get
-        {
-            var themeName = Gtk.Settings.GetDefault()?.GtkThemeName;
-            return themeName?.Contains("dark", StringComparison.OrdinalIgnoreCase) == true;
-        }
-    }
+    /// <summary>
+    /// Whether the application renders dark: the applied color theme's
+    /// darkness, falling back to desktop detection before a theme applies.
+    /// </summary>
+    public static bool PrefersDark =>
+        ThemeService.CurrentTheme?.IsDark ?? ThemeService.SystemPrefersDark();
 }

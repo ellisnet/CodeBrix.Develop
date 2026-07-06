@@ -26,6 +26,7 @@ public class SolutionPad
     readonly Gtk.ListView listView;
     readonly Gio.ListStore rootStore;
     readonly Gtk.SingleSelection selection;
+    readonly Gtk.SignalListItemFactory factory;
     // The create-model callback is marshalled to native code; keep a strong
     // reference so the delegate outlives the tree model.
     readonly Gtk.TreeListModelCreateModelFunc createChildModel;
@@ -41,7 +42,7 @@ public class SolutionPad
         var treeModel = Gtk.TreeListModel.New(rootStore, passthrough: false, autoexpand: false, createFunc: createChildModel);
         selection = Gtk.SingleSelection.New(treeModel);
 
-        var factory = Gtk.SignalListItemFactory.New();
+        factory = Gtk.SignalListItemFactory.New();
         factory.OnSetup += static (_, args) =>
         {
             var listItem = (Gtk.ListItem) args.Object;
@@ -88,10 +89,21 @@ public class SolutionPad
         scrolled.SetChild(listView);
         scrolled.SetHexpand(true);
         scrolled.SetVexpand(true);
+        scrolled.AddCssClass("cb-sidebar");
     }
 
     /// <summary>The widget to place in the workbench.</summary>
     public Gtk.Widget Widget => scrolled;
+
+    /// <summary>
+    /// Rebinds all visible rows so their icons reload for the current theme
+    /// (called after a color-theme change flips the dark/light icon variants).
+    /// </summary>
+    public void RefreshIcons()
+    {
+        listView.SetFactory(null);
+        listView.SetFactory(factory);
+    }
 
     /// <summary>Replaces the tree content with the given solution.</summary>
     public void LoadSolution(Solution solution)

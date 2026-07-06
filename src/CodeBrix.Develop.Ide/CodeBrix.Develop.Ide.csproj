@@ -25,6 +25,14 @@
   </ItemGroup>
 
   <ItemGroup>
+    <!-- Visual Studio Code color theme definitions: unmodified JSON from
+         the MIT-licensed microsoft/vscode repository (see
+         THIRD-PARTY-NOTICES.txt; the MIT text is the LICENSE.txt file
+         beside the themes). Translated at run time by ThemeService. -->
+    <EmbeddedResource Include="Assets\VSCodeThemes\*.json" LogicalName="themes/%(Filename)%(Extension)" />
+  </ItemGroup>
+
+  <ItemGroup>
     <ProjectReference Include="..\CodeBrix.Develop.Core\CodeBrix.Develop.Core.csproj" />
   </ItemGroup>
 

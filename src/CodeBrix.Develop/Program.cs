@@ -10,7 +10,9 @@
 using System;
 using System.IO;
 using CodeBrix.Develop.Core;
+using CodeBrix.Develop.Core.Options;
 using CodeBrix.Develop.Ide;
+using CodeBrix.Develop.Ide.Themes;
 using Gio = CodeBrix.Develop.UI.Gio;
 using Gtk = CodeBrix.Develop.UI.Gtk;
 
@@ -23,9 +25,17 @@ static class Program
         // Locate the SDK's MSBuild before anything touches Roslyn workspaces.
         Runtime.Initialize();
 
+        // Open (or silently create) options.sqlite and run the startup
+        // auto-backup + pruning — before any UI exists, so everything below
+        // can read configuration.
+        PropertyService.Initialize();
+
         var application = Gtk.Application.New("com.codebrix.develop", Gio.ApplicationFlags.NonUnique);
         application.OnActivate += (sender, eventArgs) =>
         {
+            // The color theme must be applied before the first window renders.
+            ThemeService.Initialize();
+
             IdeApp.Initialize((Gtk.Application) sender);
 
             // Optional command-line argument: a solution/project to open.
