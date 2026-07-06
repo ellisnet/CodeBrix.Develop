@@ -6,8 +6,8 @@
     <RootNamespace>CodeBrix.Develop</RootNamespace>
     <AssemblyName>CodeBrix.Develop</AssemblyName>
     <Nullable>enable</Nullable>
-    <!-- Linux x64 only for now; the RID keeps restore/publish honest about it. -->
-    <RuntimeIdentifiers>linux-x64</RuntimeIdentifiers>
+    <!-- Linux x64 and arm64; the RIDs keep restore/publish honest about it. -->
+    <RuntimeIdentifiers>linux-x64;linux-arm64</RuntimeIdentifiers>
     <InvariantGlobalization>false</InvariantGlobalization>
   </PropertyGroup>
 
