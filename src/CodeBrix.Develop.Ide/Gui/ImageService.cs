@@ -18,6 +18,7 @@ using System.Linq;
 using System.Reflection;
 using CodeBrix.Develop.Core;
 using Gdk = CodeBrix.Develop.UI.Gdk;
+using GdkPixbuf = CodeBrix.Develop.UI.GdkPixbuf;
 using GLib = CodeBrix.Develop.UI.GLib;
 using Gtk = CodeBrix.Develop.UI.Gtk;
 
@@ -56,6 +57,46 @@ public static class ImageService
         var texture = LoadFirstExisting(Candidates(name, dark, disabled));
         cache[key] = texture;
         return texture;
+    }
+
+    static readonly Dictionary<string, GdkPixbuf.Pixbuf?> pixbufCache = new(StringComparer.Ordinal);
+
+    /// <summary>
+    /// Returns the icon as a <see cref="GdkPixbuf.Pixbuf"/> (needed by
+    /// GtkSourceView mark attributes), or null when the icon does not exist.
+    /// </summary>
+    public static GdkPixbuf.Pixbuf? GetPixbuf(string name)
+    {
+        var dark = WorkbenchTheme.PrefersDark;
+        var key = $"{name}|{(dark ? 'd' : 'l')}";
+        if (pixbufCache.TryGetValue(key, out var cached))
+            return cached;
+
+        GdkPixbuf.Pixbuf? pixbuf = null;
+        foreach (var resourceName in Candidates(name, dark, disabled: false))
+        {
+            if (!resourceNames.Contains(resourceName))
+                continue;
+            try
+            {
+                using var stream = assembly.GetManifestResourceStream(resourceName);
+                if (stream == null)
+                    continue;
+                using var memory = new MemoryStream();
+                stream.CopyTo(memory);
+                var loader = GdkPixbuf.PixbufLoader.New();
+                loader.WriteBytes(GLib.Bytes.New(memory.ToArray()));
+                loader.Close();
+                pixbuf = loader.GetPixbuf();
+                break;
+            }
+            catch (Exception ex)
+            {
+                LoggingService.LogWarning($"Could not load icon resource {resourceName} as a pixbuf: {ex.Message}");
+            }
+        }
+        pixbufCache[key] = pixbuf;
+        return pixbuf;
     }
 
     /// <summary>Creates a 16px-sized <see cref="Gtk.Image"/> for a logical icon name.</summary>

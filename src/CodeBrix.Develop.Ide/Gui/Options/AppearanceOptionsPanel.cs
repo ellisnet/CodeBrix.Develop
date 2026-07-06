@@ -74,6 +74,9 @@ public class AppearanceOptionsPanel : OptionsPanel
     }
 
     /// <inheritdoc/>
+    public override bool HasUnsavedChanges() => selectedThemeId != originalThemeId;
+
+    /// <inheritdoc/>
     public override void ApplyChanges()
     {
         if (selectedThemeId != null)

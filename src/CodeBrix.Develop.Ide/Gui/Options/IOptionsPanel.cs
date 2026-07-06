@@ -51,6 +51,12 @@ public interface IOptionsPanel
     /// <summary>Validates pending changes; returning false keeps the dialog open.</summary>
     bool ValidateChanges();
 
+    /// <summary>
+    /// Whether the panel currently holds changes that have not been applied
+    /// (used, for example, to offer saving before an application restart).
+    /// </summary>
+    bool HasUnsavedChanges();
+
     /// <summary>Commits pending changes (the dialog was confirmed with OK).</summary>
     void ApplyChanges();
 

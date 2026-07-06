@@ -137,6 +137,111 @@ public class SolutionTests : IDisposable
         //Assert
         act.Should().Throw<FileNotFoundException>();
     }
+
+    const string SharedShproj = """
+        <?xml version="1.0" encoding="utf-8"?>
+        <Project ToolsVersion="15.0" xmlns="http://schemas.microsoft.com/developer/msbuild/2003">
+          <PropertyGroup Label="Globals">
+            <ProjectGuid>d1e2f3a4-b5c6-4d7e-8f90-123456789abc</ProjectGuid>
+          </PropertyGroup>
+          <Import Project="Alpha.UI.projitems" Label="Shared" />
+        </Project>
+        """;
+
+    [Fact]
+    public void Load_includes_shproj_shared_projects_from_slnx()
+    {
+        //Arrange
+        WriteFile("src/Alpha.UI/Alpha.UI.shproj", SharedShproj);
+        WriteFile("src/Beta/Beta.csproj", ExeCsproj);
+        var slnxPath = WriteFile("Sample.slnx", """
+            <Solution>
+              <Folder Name="/CodeBrixPlatform/">
+                <Project Path="src/Alpha.UI/Alpha.UI.shproj" />
+                <Project Path="src/Beta/Beta.csproj" />
+              </Folder>
+            </Solution>
+            """);
+
+        //Act
+        var solution = Solution.Load(slnxPath);
+
+        //Assert
+        solution.Projects.Count.Should().Be(2);
+        solution.Projects[0].Name.Should().Be("Alpha.UI");
+        solution.Projects[0].IsSharedProject.Should().BeTrue();
+        solution.Projects[1].IsSharedProject.Should().BeFalse();
+    }
+
+    [Fact]
+    public void Load_includes_shproj_shared_projects_from_classic_sln()
+    {
+        //Arrange
+        WriteFile("src/Alpha.UI/Alpha.UI.shproj", SharedShproj);
+        var slnPath = WriteFile("Sample.sln", """
+            Microsoft Visual Studio Solution File, Format Version 12.00
+            Project("{D954291E-2A0B-460D-934E-DC6B0785DB48}") = "Alpha.UI", "src\Alpha.UI\Alpha.UI.shproj", "{13903639-2FEE-43D3-A920-4FB073E6702B}"
+            EndProject
+            Global
+            EndGlobal
+            """);
+
+        //Act
+        var solution = Solution.Load(slnPath);
+
+        //Assert
+        solution.Projects.Count.Should().Be(1);
+        solution.Projects[0].IsSharedProject.Should().BeTrue();
+    }
+
+    [Fact]
+    public void Load_reads_slnx_solution_folders()
+    {
+        //Arrange
+        WriteFile("src/Alpha/Alpha.csproj", LibraryCsproj);
+        WriteFile("src/libs/Beta/Beta.csproj", LibraryCsproj);
+        WriteFile("tests/libs/Beta.Tests/Beta.Tests.csproj", LibraryCsproj);
+        var slnxPath = WriteFile("Sample.slnx", """
+            <Solution>
+              <Project Path="src/Alpha/Alpha.csproj" />
+              <Folder Name="/Libraries/">
+                <Project Path="src/libs/Beta/Beta.csproj" />
+              </Folder>
+              <Folder Name="/Tests/">
+                <Project Path="tests/libs/Beta.Tests/Beta.Tests.csproj" />
+              </Folder>
+            </Solution>
+            """);
+
+        //Act
+        var solution = Solution.Load(slnxPath);
+
+        //Assert
+        solution.Projects[0].SolutionFolder.Should().Be("");
+        solution.Projects[1].SolutionFolder.Should().Be("Libraries");
+        solution.Projects[2].SolutionFolder.Should().Be("Tests");
+        solution.SolutionFolderNames.Should().Equal(new[] { "Libraries", "Tests" });
+    }
+
+    [Fact]
+    public void Shared_projects_are_never_the_startup_project()
+    {
+        //Arrange — the shared project listed first, an executable second.
+        WriteFile("src/Alpha.UI/Alpha.UI.shproj", SharedShproj);
+        WriteFile("src/Beta/Beta.csproj", ExeCsproj);
+        var slnxPath = WriteFile("Sample.slnx", """
+            <Solution>
+              <Project Path="src/Alpha.UI/Alpha.UI.shproj" />
+              <Project Path="src/Beta/Beta.csproj" />
+            </Solution>
+            """);
+
+        //Act
+        var solution = Solution.Load(slnxPath);
+
+        //Assert
+        solution.StartupProject.Name.Should().Be("Beta");
+    }
 }
 
 public class DotNetProjectTests : IDisposable

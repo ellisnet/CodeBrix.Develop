@@ -27,11 +27,37 @@ public static class IdePreferences
         ConfigurationProperty.Create("CodeBrix.Develop.Ide.ColorTheme", "");
 
     /// <summary>
+    /// The folder where the user's projects normally live, or "" to use the
+    /// user's Documents folder. Read it through
+    /// <see cref="IdeApp.GetProjectsDirectory"/>, which handles the blank
+    /// default and silently blanks a folder that no longer exists.
+    /// </summary>
+    public static readonly ConfigurationProperty<string> ProjectsFolder =
+        ConfigurationProperty.Create("CodeBrix.Develop.Ide.ProjectsFolder", "");
+
+    /// <summary>
     /// How many automatic startup backups of options.sqlite to retain;
     /// 0 disables the automatic backup entirely.
     /// </summary>
     public static readonly ConfigurationProperty<int> AutoBackupRetention =
         ConfigurationProperty.Create(OptionsStore.AutoBackupRetentionKey, OptionsStore.DefaultAutoBackupRetention);
+
+    /// <summary>
+    /// The full path of the last solution the user worked on, reopened on
+    /// the next start; "" when no solution was open when the application
+    /// closed (the next start then shows the New Application experience).
+    /// </summary>
+    public static readonly ConfigurationProperty<string> LastSolution =
+        ConfigurationProperty.Create("CodeBrix.Develop.Ide.LastSolution", "");
+
+    /// <summary>
+    /// The full path of the project file chosen via "Set as Startup Project",
+    /// or "" to run the solution's default (first executable) project. Read
+    /// it through <see cref="IdeApp.GetStartupProject"/>, which silently
+    /// blanks a value that is invalid or not part of the open solution.
+    /// </summary>
+    public static readonly ConfigurationProperty<string> StartupProject =
+        ConfigurationProperty.Create("CodeBrix.Develop.Ide.StartupProject", "");
 
     /// <summary>The remembered workbench window width.</summary>
     public static readonly ConfigurationProperty<int> WorkbenchWidth =

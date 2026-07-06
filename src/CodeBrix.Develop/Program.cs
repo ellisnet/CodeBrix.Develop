@@ -8,6 +8,7 @@
 //
 
 using System;
+using System.Diagnostics;
 using System.IO;
 using CodeBrix.Develop.Core;
 using CodeBrix.Develop.Core.Options;
@@ -38,12 +39,30 @@ static class Program
 
             IdeApp.Initialize((Gtk.Application) sender);
 
-            // Optional command-line argument: a solution/project to open.
-            if (args.Length > 0 && File.Exists(args[0]))
+            // A solution/project on the command line wins (unless it is the
+            // IDE's own csproj, forwarded by "dotnet run"); otherwise reopen
+            // the last solution, or show the New Application experience.
+            if (args.Length > 0 && File.Exists(args[0]) && !IdeApp.IsOwnProjectFile(args[0]))
                 _ = IdeApp.Workbench!.LoadSolutionAsync(Path.GetFullPath(args[0]));
+            else
+                _ = IdeApp.Workbench!.RestoreStartupSolutionAsync();
         };
 
         LoggingService.LogInfo("CodeBrix Develop starting");
-        return application.RunWithSynchronizationContext(null);
+        var exitCode = application.RunWithSynchronizationContext(null);
+
+        // A restart request (e.g. to adopt an imported options file) is
+        // honored only after the GTK main loop — and with it every handle on
+        // options.sqlite — has fully wound down.
+        if (IdeApp.RestartRequested && Environment.ProcessPath is { } processPath)
+        {
+            LoggingService.LogInfo("CodeBrix Develop restarting");
+            PropertyService.Store.Dispose(); // the new process takes over options.sqlite
+            var startInfo = new ProcessStartInfo(processPath) { UseShellExecute = false };
+            foreach (var arg in args)
+                startInfo.ArgumentList.Add(arg);
+            Process.Start(startInfo);
+        }
+        return exitCode;
     }
 }

@@ -65,6 +65,8 @@ public static class IdeOptionsSections
         {
             Children =
             {
+                new OptionsSection("General", "General", "prefs-generic-16",
+                    () => new GeneralOptionsPanel()),
                 new OptionsSection("Appearance", "Appearance", "prefs-visual-style-16",
                     () => new AppearanceOptionsPanel()),
                 new OptionsSection("Backup", "Backup", "prefs-maintenance-16",

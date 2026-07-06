@@ -18,6 +18,8 @@ public enum SolutionTreeNodeKind
 {
     /// <summary>The solution root node.</summary>
     Solution,
+    /// <summary>A solution folder (e.g. "Libraries", "Tests") grouping projects; nothing on disk.</summary>
+    SolutionFolder,
     /// <summary>A project node.</summary>
     Project,
     /// <summary>A directory inside a project.</summary>
@@ -61,6 +63,8 @@ public partial class SolutionTreeNode
         node.IconName = kind switch
         {
             SolutionTreeNodeKind.Solution => "solution-16",
+            SolutionTreeNodeKind.SolutionFolder => "folder-solution-16",
+            SolutionTreeNodeKind.Project when path.HasExtension(".shproj") => "project-crossplatform-shared-32",
             SolutionTreeNodeKind.Project => "project-16",
             SolutionTreeNodeKind.Folder => "folder-generic-16",
             _ => GetFileIconName(path),
@@ -76,7 +80,8 @@ public partial class SolutionTreeNode
         {
             ".cs" or ".fs" or ".vb" => "file-source-16",
             ".xml" or ".xaml" or ".axaml" or ".html" or ".htm" or ".config"
-                or ".csproj" or ".fsproj" or ".sln" or ".slnx" or ".props" or ".targets" => "file-web-16",
+                or ".csproj" or ".fsproj" or ".shproj" or ".projitems"
+                or ".sln" or ".slnx" or ".props" or ".targets" => "file-web-16",
             ".css" => "file-css-16",
             ".scss" => "file-scss-16",
             ".less" => "file-less-16",

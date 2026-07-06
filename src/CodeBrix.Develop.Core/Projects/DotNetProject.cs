@@ -16,7 +16,10 @@ using System.Xml.Linq;
 namespace CodeBrix.Develop.Core.Projects;
 
 /// <summary>
-/// A .NET project loaded from an SDK-style .csproj file.
+/// A project loaded from an SDK-style .csproj file, or a Visual Studio
+/// shared project (.shproj — a container of source files compiled into each
+/// project that imports its sibling .projitems, producing no assembly of
+/// its own).
 /// </summary>
 public class DotNetProject
 {
@@ -31,6 +34,13 @@ public class DotNetProject
     /// <summary>The directory containing the project file.</summary>
     public FilePath BaseDirectory => FileName.ParentDirectory;
 
+    /// <summary>
+    /// The solution folder this project appears under in its solution (e.g.
+    /// "Tests"), or "" when it sits at the solution root. Solution folders
+    /// are an organizational grouping only — nothing exists on disk.
+    /// </summary>
+    public string SolutionFolder { get; internal set; } = "";
+
     /// <summary>The Sdk attribute value, e.g. "Microsoft.NET.Sdk".</summary>
     public string Sdk { get; private set; }
 
@@ -42,10 +52,18 @@ public class DotNetProject
 
     /// <summary>Whether the project produces a runnable executable.</summary>
     public bool IsExecutable
-        => string.Equals(OutputType, "Exe", StringComparison.OrdinalIgnoreCase)
-        || string.Equals(OutputType, "WinExe", StringComparison.OrdinalIgnoreCase);
+        => !IsSharedProject
+        && (string.Equals(OutputType, "Exe", StringComparison.OrdinalIgnoreCase)
+        || string.Equals(OutputType, "WinExe", StringComparison.OrdinalIgnoreCase));
 
-    /// <summary>Loads a project from an SDK-style .csproj file.</summary>
+    /// <summary>
+    /// Whether this is a shared project (.shproj): it is never built or
+    /// loaded into the type system itself — its files are compiled into
+    /// each project that imports the sibling .projitems file.
+    /// </summary>
+    public bool IsSharedProject => FileName.HasExtension(".shproj");
+
+    /// <summary>Loads a project from an SDK-style .csproj or a shared .shproj file.</summary>
     public static DotNetProject Load(FilePath fileName)
     {
         if (!File.Exists(fileName))
@@ -74,6 +92,16 @@ public class DotNetProject
 
     static string GetProperty(IEnumerable<XElement> properties, string name)
         => properties.FirstOrDefault(p => p.Name.LocalName == name)?.Value;
+
+    /// <summary>
+    /// The path of the built executable (the Linux apphost) for the given
+    /// configuration — where "dotnet build" puts it by default.
+    /// </summary>
+    public FilePath GetOutputExecutable(string configuration = "Debug")
+    {
+        var targetFramework = TargetFrameworks.Count > 0 ? TargetFrameworks[0] : "net10.0";
+        return new FilePath(Path.Combine(BaseDirectory, "bin", configuration, targetFramework, Name));
+    }
 
     /// <summary>
     /// Enumerates the files belonging to this project, mirroring the SDK's

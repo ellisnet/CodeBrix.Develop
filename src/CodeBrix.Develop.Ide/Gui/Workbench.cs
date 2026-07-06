@@ -8,12 +8,17 @@
 //
 
 using System;
+using System.IO;
+using System.Linq;
 using System.Threading;
 using System.Threading.Tasks;
 using System.Collections.Generic;
 using CodeBrix.Develop.Core;
+using CodeBrix.Develop.Core.Debugging;
 using CodeBrix.Develop.Core.Projects;
 using CodeBrix.Develop.Core.TypeSystem;
+using CodeBrix.Develop.Ide.Debugging;
+using CodeBrix.Develop.Ide.Gui.Dialogs;
 using CodeBrix.Develop.Ide.Gui.Documents;
 using CodeBrix.Develop.Ide.Gui.Options;
 using CodeBrix.Develop.Ide.Gui.Pads;
@@ -35,8 +40,10 @@ public class Workbench
     readonly DocumentManager documentManager;
     readonly OutputPad buildOutput;
     readonly OutputPad applicationOutput;
+    readonly CallStackPad callStackPad;
     readonly Gtk.Notebook bottomNotebook;
     readonly Gtk.Label statusLabel;
+    EditorDocument? executionDocument;
 
     readonly Gtk.Paned verticalSplit;
     readonly Gtk.Paned horizontalSplit;
@@ -47,7 +54,8 @@ public class Workbench
     readonly SynchronizationContext uiContext;
     CancellationTokenSource? runCancellation;
 
-    Gio.SimpleAction? buildAction, rebuildAction, cleanAction, runAction, stopAction;
+    Gio.SimpleAction? buildAction, rebuildAction, cleanAction, runAction, stopAction, closeSolutionAction;
+    Gio.SimpleAction? debugAction, stepOverAction, stepIntoAction, stepOutAction;
 
     /// <summary>Creates the workbench window for the given application.</summary>
     public Workbench(Gtk.Application app)
@@ -67,18 +75,32 @@ public class Workbench
 
         solutionPad = new SolutionPad();
         solutionPad.FileActivated += OpenDocument;
+        solutionPad.StartupProjectChanged += () =>
+        {
+            if (IdeApp.GetStartupProject(IdeApp.CurrentSolution) is { } startup)
+                ShowStatus($"Startup project: {startup.Name}");
+        };
 
         documentManager = new DocumentManager();
 
         buildOutput = new OutputPad();
         applicationOutput = new OutputPad();
+        callStackPad = new CallStackPad();
+        callStackPad.FrameActivated += (file, line) => NavigateTo(file, line);
         bottomNotebook = Gtk.Notebook.New();
         bottomNotebook.AppendPage(buildOutput.Widget, Gtk.Label.New("Build Output"));
         bottomNotebook.AppendPage(applicationOutput.Widget, Gtk.Label.New("Application Output"));
+        bottomNotebook.AppendPage(callStackPad.Widget, Gtk.Label.New("Call Stack"));
         bottomNotebook.SetVexpand(false);
 
         buildService.OutputReceived += line => uiContext.Post(_ => buildOutput.AppendLine(line), null);
         runService.OutputReceived += line => uiContext.Post(_ => applicationOutput.AppendLine(line), null);
+
+        // Debugger state changes arrive on background threads.
+        DebugService.Paused += (reason, frames) => uiContext.Post(_ => OnDebugPaused(reason, frames), null);
+        DebugService.Resumed += () => uiContext.Post(_ => OnDebugResumed(), null);
+        DebugService.SessionEnded += exitCode => uiContext.Post(_ => OnDebugEnded(exitCode), null);
+        DebugService.OutputReceived += line => uiContext.Post(_ => applicationOutput.AppendLine(line), null);
 
         verticalSplit = Gtk.Paned.New(Gtk.Orientation.Vertical);
         verticalSplit.SetStartChild(documentManager.Widget);
@@ -115,10 +137,20 @@ public class Workbench
         application.SetMenubar(BuildMenubarModel());
         window.SetShowMenubar(true);
 
+        // GTK reserves F10 for menubar activation; a capture-phase shortcut
+        // on the window wins, keeping the VS convention (F10 = Step Over).
+        var stepOverShortcut = Gtk.ShortcutController.New();
+        stepOverShortcut.SetPropagationPhase(Gtk.PropagationPhase.Capture);
+        stepOverShortcut.AddShortcut(Gtk.Shortcut.New(
+            Gtk.ShortcutTrigger.ParseString("F10"),
+            Gtk.NamedAction.New("app.step-over")));
+        window.AddController(stepOverShortcut);
+
         // Everything remembered about the UI goes to options.sqlite on the
         // way out (the portable-configuration principle).
         window.OnCloseRequest += (_, _) =>
         {
+            DebugService.Shutdown(clearBreakpoints: false);
             documentManager.SaveAll();
             SaveUiState();
             return false;
@@ -164,8 +196,13 @@ public class Workbench
         toolbar.Append(ToolbarSeparator());
         toolbar.Append(ToolButton("build-target-16", "app.build", "Build Solution (Ctrl+Shift+B)"));
         toolbar.Append(ToolbarSeparator());
-        toolbar.Append(ToolButton("execute-16", "app.run", "Start Without Debugging (F5)"));
+        toolbar.Append(ToolButton("bug-16", "app.debug", "Start Debugging / Continue (F5)"));
+        toolbar.Append(ToolButton("execute-16", "app.run", "Start Without Debugging (Ctrl+F5)"));
         toolbar.Append(ToolButton("stop-16", "app.stop", "Stop (Shift+F5)"));
+        toolbar.Append(ToolbarSeparator());
+        toolbar.Append(ToolButton("step-over-16", "app.step-over", "Step Over (F10)"));
+        toolbar.Append(ToolButton("step-in-16", "app.step-into", "Step Into (F11)"));
+        toolbar.Append(ToolButton("step-out-16", "app.step-out", "Step Out (Shift+F11)"));
         return toolbar;
     }
 
@@ -199,7 +236,9 @@ public class Workbench
 
     void InstallActions()
     {
+        AddAction("new-application", ShowNewApplicationDialog, "<Control><Shift>n");
         AddAction("open-solution", () => _ = OpenSolutionDialogAsync(), "<Control>o");
+        closeSolutionAction = AddAction("close-solution", CloseSolution, null, enabled: false);
         AddAction("save", () => { documentManager.SaveActive(); ShowStatus("Saved"); }, "<Control>s");
         AddAction("save-all", () => { documentManager.SaveAll(); ShowStatus("All files saved"); }, "<Control><Shift>s");
         AddAction("close-file", () =>
@@ -208,13 +247,26 @@ public class Workbench
                 documentManager.CloseDocument(document);
         }, "<Control>w");
         AddAction("options", ShowOptions, "<Control>comma");
-        AddAction("quit", () => { documentManager.SaveAll(); SaveUiState(); application.Quit(); }, "<Control>q");
+        AddAction("quit", () =>
+        {
+            DebugService.Shutdown(clearBreakpoints: false);
+            documentManager.SaveAll();
+            SaveUiState();
+            application.Quit();
+        }, "<Control>q");
 
         buildAction = AddAction("build", () => _ = BuildAsync(rebuild: false), "<Control><Shift>b", enabled: false);
         rebuildAction = AddAction("rebuild", () => _ = BuildAsync(rebuild: true), null, enabled: false);
         cleanAction = AddAction("clean", () => _ = CleanAsync(), null, enabled: false);
-        runAction = AddAction("run", () => _ = RunAsync(), "F5", enabled: false);
-        stopAction = AddAction("stop", () => runCancellation?.Cancel(), "<Shift>F5", enabled: false);
+        // VS/MonoDevelop convention: F5 debugs (or continues), Ctrl+F5 runs
+        // without debugging.
+        debugAction = AddAction("debug", () => _ = DebugAsync(), "F5", enabled: false);
+        runAction = AddAction("run", () => _ = RunAsync(), "<Control>F5", enabled: false);
+        stepOverAction = AddAction("step-over", () => _ = DebugService.StepOverAsync(), "F10", enabled: false);
+        stepIntoAction = AddAction("step-into", () => _ = DebugService.StepIntoAsync(), "F11", enabled: false);
+        stepOutAction = AddAction("step-out", () => _ = DebugService.StepOutAsync(), "<Shift>F11", enabled: false);
+        stopAction = AddAction("stop", StopRunOrDebug, "<Shift>F5", enabled: false);
+        AddAction("toggle-breakpoint", () => documentManager.ActiveDocument?.ToggleBreakpointAtCaret(), "F9");
 
         AddAction("complete", () => _ = documentManager.ActiveDocument?.ShowCompletionAsync(), "<Control>space");
         AddAction("about", ShowAbout);
@@ -244,8 +296,13 @@ public class Workbench
 
     Gio.MenuModel BuildMenubarModel()
     {
+        var newMenu = Gio.Menu.New();
+        newMenu.Append("CodeBrix.Platform _Application…", "app.new-application");
+
         var fileMenu = Gio.Menu.New();
+        fileMenu.AppendSubmenu("_New", newMenu);
         fileMenu.Append("_Open Solution…", "app.open-solution");
+        fileMenu.Append("Close Solutio_n", "app.close-solution");
         fileMenu.Append("_Save", "app.save");
         fileMenu.Append("Save _All", "app.save-all");
         fileMenu.Append("_Close File", "app.close-file");
@@ -261,7 +318,12 @@ public class Workbench
         buildMenu.Append("C_lean Solution", "app.clean");
 
         var runMenu = Gio.Menu.New();
+        runMenu.Append("Start _Debugging / Continue", "app.debug");
         runMenu.Append("_Start Without Debugging", "app.run");
+        runMenu.Append("Step _Over", "app.step-over");
+        runMenu.Append("Step _Into", "app.step-into");
+        runMenu.Append("Step O_ut", "app.step-out");
+        runMenu.Append("Toggle _Breakpoint", "app.toggle-breakpoint");
         runMenu.Append("S_top", "app.stop");
 
         var helpMenu = Gio.Menu.New();
@@ -302,6 +364,8 @@ public class Workbench
         var dialog = Gtk.FileDialog.New();
         dialog.SetTitle("Open Solution");
         dialog.SetFilters(filters);
+        // Start where the user keeps their projects (General options page).
+        dialog.SetInitialFolder(Gio.FileHelper.NewForPath(IdeApp.GetProjectsDirectory()));
 
         Gio.File? file;
         try
@@ -336,8 +400,12 @@ public class Workbench
         IdeApp.CurrentSolution = solution;
         solutionPad.LoadSolution(solution);
         window.Title = $"{solution.Name} – CodeBrix Develop";
-        foreach (var action in new[] { buildAction, rebuildAction, cleanAction, runAction })
+        foreach (var action in new[] { buildAction, rebuildAction, cleanAction, runAction, debugAction, closeSolutionAction })
             action?.SetEnabled(true);
+        // The reopened-on-next-start solution; a startup-project choice left
+        // over from a different solution is silently blanked by the
+        // GetStartupProject validation the Solution pad just ran.
+        IdePreferences.LastSolution.Value = (string) fileName.FullPath;
         ShowStatus($"Solution '{solution.Name}' loaded ({solution.Projects.Count} project{(solution.Projects.Count == 1 ? "" : "s")}) — loading type system…");
 
         try
@@ -382,15 +450,139 @@ public class Workbench
         ShowStatus(result.Success ? "Clean succeeded" : "Clean failed");
     }
 
-    async Task RunAsync()
+    // Resolves the project the Run/Debug commands start, applying the
+    // first-run rule: with no explicit choice, the .LinuxX11 head becomes
+    // (and is persisted as) the startup project.
+    DotNetProject? ResolveStartupProjectForLaunch(Solution solution)
     {
-        if (IdeApp.CurrentSolution is not { } solution || runService.IsBusy)
-            return;
-        if (solution.StartupProject is not { } project)
+        if (IdeApp.GetStartupProject(solution) is not { } project)
         {
             ShowStatus("The solution has no executable project to run");
+            return null;
+        }
+        if (string.IsNullOrEmpty(IdePreferences.StartupProject.Value) && IdeApp.IsLinuxX11Head(project))
+        {
+            IdePreferences.StartupProject.Value = (string) project.FileName;
+            solutionPad.RefreshStartupProject();
+        }
+        return project;
+    }
+
+    void StopRunOrDebug()
+    {
+        if (DebugService.IsSessionActive)
+            _ = DebugService.StopAsync();
+        else
+            runCancellation?.Cancel();
+    }
+
+    async Task DebugAsync()
+    {
+        // While paused, F5 continues (the VS convention).
+        if (DebugService.IsPaused)
+        {
+            await DebugService.ContinueAsync();
             return;
         }
+        if (DebugService.IsSessionActive || buildService.IsBusy)
+            return;
+        if (IdeApp.CurrentSolution is not { } solution)
+            return;
+        if (ResolveStartupProjectForLaunch(solution) is not { } project)
+            return;
+
+        documentManager.SaveAll();
+        buildOutput.Clear();
+        bottomNotebook.SetCurrentPage(0);
+        ShowStatus($"Building {project.Name}…");
+        var result = await buildService.BuildAsync(project.FileName);
+        if (!result.Success)
+        {
+            ShowStatus("Build failed — debugging not started");
+            return;
+        }
+
+        applicationOutput.Clear();
+        bottomNotebook.SetCurrentPage(1);
+        ShowStatus($"Debugging {project.Name}…");
+        try
+        {
+            await DebugService.StartAsync(project);
+            stopAction?.SetEnabled(true);
+        }
+        catch (Exception ex)
+        {
+            LoggingService.LogError("Starting the debugger failed", ex);
+            ShowStatus($"Debugging could not start: {ex.Message}");
+        }
+    }
+
+    void OnDebugPaused(string reason, IReadOnlyList<StackFrameInfo> frames)
+    {
+        foreach (var action in new[] { stepOverAction, stepIntoAction, stepOutAction })
+            action?.SetEnabled(true);
+        callStackPad.ShowFrames(frames);
+        bottomNotebook.SetCurrentPage(2);
+
+        var topFrame = frames.FirstOrDefault(frame => frame.File.Length > 0);
+        if (topFrame != null)
+        {
+            NavigateTo(topFrame.File, topFrame.Line, markExecution: true);
+            ShowStatus($"Paused — {reason} at {Path.GetFileName(topFrame.File)}:{topFrame.Line}");
+        }
+        else
+        {
+            ShowStatus($"Paused — {reason}");
+        }
+    }
+
+    void OnDebugResumed()
+    {
+        foreach (var action in new[] { stepOverAction, stepIntoAction, stepOutAction })
+            action?.SetEnabled(false);
+        executionDocument?.ClearExecutionLine();
+        executionDocument = null;
+        callStackPad.Clear();
+        ShowStatus("Running…");
+    }
+
+    void OnDebugEnded(int? exitCode)
+    {
+        OnDebugResumed();
+        stopAction?.SetEnabled(false);
+        ShowStatus(exitCode is { } code ? $"Debugging ended — exit code {code}" : "Debugging ended");
+    }
+
+    void NavigateTo(FilePath file, int line, bool markExecution = false)
+    {
+        if (!File.Exists(file))
+            return;
+        try
+        {
+            var document = documentManager.OpenDocument(file);
+            if (markExecution)
+            {
+                executionDocument?.ClearExecutionLine();
+                executionDocument = document;
+                document.ShowExecutionLine(line);
+            }
+            else
+            {
+                document.ScrollToLine(line);
+            }
+        }
+        catch (Exception ex)
+        {
+            LoggingService.LogError($"Could not navigate to {file}:{line}", ex);
+        }
+    }
+
+    async Task RunAsync()
+    {
+        if (IdeApp.CurrentSolution is not { } solution || runService.IsBusy || DebugService.IsSessionActive)
+            return;
+        if (ResolveStartupProjectForLaunch(solution) is not { } project)
+            return;
 
         documentManager.SaveAll();
         applicationOutput.Clear();
@@ -414,6 +606,71 @@ public class Workbench
             runCancellation.Dispose();
             runCancellation = null;
         }
+    }
+
+    /// <summary>
+    /// Restores the solution the user last worked on, or — on a first run,
+    /// or when they closed out of their solution before exiting — shows the
+    /// New CodeBrix.Platform Application experience. Called at startup when
+    /// no solution was given on the command line.
+    /// </summary>
+    public async Task RestoreStartupSolutionAsync()
+    {
+        var lastSolution = IdePreferences.LastSolution.Value;
+        if (!string.IsNullOrEmpty(lastSolution) && IdeApp.IsOwnProjectFile(lastSolution))
+        {
+            // Left over from an accidental "dotnet run CodeBrix.Develop.csproj"
+            // self-open; never reopen the IDE's own project from memory.
+            IdePreferences.LastSolution.Value = lastSolution = "";
+        }
+        if (!string.IsNullOrEmpty(lastSolution))
+        {
+            if (File.Exists(lastSolution))
+            {
+                // A failed load keeps the remembered path: a fixed file
+                // reopens on the next start, and the user stays in the
+                // empty workbench rather than being treated as a first run.
+                await LoadSolutionAsync(lastSolution);
+                return;
+            }
+            IdePreferences.LastSolution.Value = ""; // stale path: silently forget
+        }
+        ShowNewApplicationDialog();
+    }
+
+    /// <summary>
+    /// Closes the loaded solution: all open documents are saved and closed,
+    /// the type system unloads, and the remembered last-solution and
+    /// startup-project choices are blanked. Cancel-free by design — the
+    /// blank workbench remains.
+    /// </summary>
+    void CloseSolution()
+    {
+        if (IdeApp.CurrentSolution == null)
+            return;
+        // Any live debug session dies with the solution, and per policy the
+        // breakpoints are lost too.
+        DebugService.Shutdown(clearBreakpoints: true);
+        documentManager.SaveAll();
+        foreach (var document in documentManager.Documents.ToList())
+            documentManager.CloseDocument(document);
+        TypeSystemService.UnloadSolution();
+        IdeApp.CurrentSolution = null;
+        solutionPad.Clear();
+        foreach (var action in new[] { buildAction, rebuildAction, cleanAction, runAction, debugAction,
+                     stepOverAction, stepIntoAction, stepOutAction, closeSolutionAction })
+            action?.SetEnabled(false);
+        window.Title = "CodeBrix Develop";
+        IdePreferences.LastSolution.Value = "";
+        IdePreferences.StartupProject.Value = "";
+        ShowStatus("Ready");
+    }
+
+    void ShowNewApplicationDialog()
+    {
+        var dialog = new NewApplicationDialog(window);
+        dialog.Created += slnxPath => _ = LoadSolutionAsync(slnxPath);
+        dialog.Present();
     }
 
     void ShowOptions()

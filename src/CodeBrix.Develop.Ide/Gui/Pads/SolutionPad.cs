@@ -8,6 +8,8 @@
 //
 
 using System;
+using System.Collections.Generic;
+using System.Linq;
 using CodeBrix.Develop.Core;
 using CodeBrix.Develop.Core.Projects;
 using Gio = CodeBrix.Develop.UI.Gio;
@@ -18,7 +20,9 @@ namespace CodeBrix.Develop.Ide.Gui.Pads;
 
 /// <summary>
 /// The Solution pad: a lazily populated tree of the loaded solution, its
-/// projects, and their folders and files.
+/// projects, and their folders and files. The project the Run command
+/// starts (the startup project) is shown in bold, and executable project
+/// nodes offer "Set as Startup Project" on right-click.
 /// </summary>
 public class SolutionPad
 {
@@ -30,9 +34,22 @@ public class SolutionPad
     // The create-model callback is marshalled to native code; keep a strong
     // reference so the delegate outlives the tree model.
     readonly Gtk.TreeListModelCreateModelFunc createChildModel;
+    // Same rule for the per-row right-click gestures: without a managed
+    // reference their signal closures can be collected and never fire.
+    readonly List<Gtk.GestureClick> rowGestures = new();
+
+    // The full path of the effective startup project ("" when no solution),
+    // cached so every row bind does not re-run the preference validation.
+    string startupProjectPath = "";
 
     /// <summary>Raised when the user activates (double-clicks / Enter) a file node.</summary>
     public event Action<FilePath>? FileActivated;
+
+    /// <summary>
+    /// Raised after the user picked "Set as Startup Project" on a project
+    /// node (the preference is already updated).
+    /// </summary>
+    public event Action? StartupProjectChanged;
 
     /// <summary>Creates the pad and its (initially empty) tree.</summary>
     public SolutionPad()
@@ -43,7 +60,7 @@ public class SolutionPad
         selection = Gtk.SingleSelection.New(treeModel);
 
         factory = Gtk.SignalListItemFactory.New();
-        factory.OnSetup += static (_, args) =>
+        factory.OnSetup += (_, args) =>
         {
             var listItem = (Gtk.ListItem) args.Object;
             var expander = Gtk.TreeExpander.New();
@@ -56,8 +73,24 @@ public class SolutionPad
             box.Append(label);
             expander.SetChild(box);
             listItem.SetChild(expander);
+
+            // Right-click on an executable project row offers "Set as
+            // Startup Project" — the node is resolved at click time because
+            // the recycled row widget is rebound as the user scrolls.
+            var rightClick = Gtk.GestureClick.New();
+            rightClick.SetButton(3);
+            // Capture phase: the ListView's own click handling must not
+            // swallow the press before it reaches the row content.
+            rightClick.SetPropagationPhase(Gtk.PropagationPhase.Capture);
+            rightClick.OnPressed += (_, _) =>
+            {
+                if (listItem.GetItem() is Gtk.TreeListRow row && row.GetItem() is SolutionTreeNode node)
+                    ShowProjectContextMenu(node, expander);
+            };
+            expander.AddController(rightClick);
+            rowGestures.Add(rightClick);
         };
-        factory.OnBind += static (_, args) =>
+        factory.OnBind += (_, args) =>
         {
             var listItem = (Gtk.ListItem) args.Object;
             if (listItem.GetItem() is not Gtk.TreeListRow row || row.GetItem() is not SolutionTreeNode node)
@@ -68,7 +101,10 @@ public class SolutionPad
             var image = (Gtk.Image) box.GetFirstChild()!;
             var label = (Gtk.Label) image.GetNextSibling()!;
             image.SetFromPaintable(ImageService.GetIcon(node.IconName));
-            label.SetText(node.Title);
+            if (node.Kind == SolutionTreeNodeKind.Project && node.Path == startupProjectPath)
+                label.SetMarkup($"<b>{MarkupEscape(node.Title)}</b>");
+            else
+                label.SetText(node.Title);
         };
 
         listView = Gtk.ListView.New(selection, factory);
@@ -99,18 +135,69 @@ public class SolutionPad
     /// Rebinds all visible rows so their icons reload for the current theme
     /// (called after a color-theme change flips the dark/light icon variants).
     /// </summary>
-    public void RefreshIcons()
-    {
-        listView.SetFactory(null);
-        listView.SetFactory(factory);
-    }
+    public void RefreshIcons() => RebindRows();
 
     /// <summary>Replaces the tree content with the given solution.</summary>
     public void LoadSolution(Solution solution)
     {
         rootStore.RemoveAll();
         rootStore.Append(SolutionTreeNode.Create(SolutionTreeNodeKind.Solution, $"Solution '{solution.Name}'", solution.FileName));
+        RefreshStartupProject();
     }
+
+    /// <summary>Empties the tree (the solution was closed).</summary>
+    public void Clear()
+    {
+        rootStore.RemoveAll();
+        startupProjectPath = "";
+    }
+
+    /// <summary>
+    /// Re-reads the effective startup project and updates the bold
+    /// indicator on the visible rows.
+    /// </summary>
+    public void RefreshStartupProject()
+    {
+        var startup = IdeApp.GetStartupProject(IdeApp.CurrentSolution);
+        startupProjectPath = startup == null ? "" : (string) startup.FileName;
+        RebindRows();
+    }
+
+    // Resetting the factory makes the ListView re-run OnBind for every
+    // visible row.
+    void RebindRows()
+    {
+        listView.SetFactory(null);
+        listView.SetFactory(factory);
+    }
+
+    void ShowProjectContextMenu(SolutionTreeNode node, Gtk.Widget anchor)
+    {
+        if (node.Kind != SolutionTreeNodeKind.Project || IdeApp.CurrentSolution is not { } solution)
+            return;
+        var project = solution.Projects.FirstOrDefault(candidate =>
+            string.Equals((string) candidate.FileName, node.Path, StringComparison.Ordinal));
+        if (project is not { IsExecutable: true })
+            return;
+
+        var setStartupButton = Gtk.Button.NewWithLabel("Set as Startup Project");
+        setStartupButton.SetHasFrame(false);
+        var popover = Gtk.Popover.New();
+        popover.SetChild(setStartupButton);
+        popover.SetParent(anchor);
+        popover.OnClosed += (_, _) => popover.Unparent();
+        setStartupButton.OnClicked += (_, _) =>
+        {
+            IdePreferences.StartupProject.Value = node.Path;
+            popover.Popdown();
+            RefreshStartupProject();
+            StartupProjectChanged?.Invoke();
+        };
+        popover.Popup();
+    }
+
+    static string MarkupEscape(string text) =>
+        text.Replace("&", "&amp;").Replace("<", "&lt;").Replace(">", "&gt;");
 
     static Gio.ListModel? CreateChildModel(GObject.Object item)
     {
@@ -127,7 +214,24 @@ public class SolutionPad
                     if (solution == null)
                         return null;
                     foreach (var project in solution.Projects)
-                        children.Append(SolutionTreeNode.Create(SolutionTreeNodeKind.Project, project.Name, project.FileName));
+                    {
+                        if (project.SolutionFolder.Length == 0)
+                            children.Append(SolutionTreeNode.Create(SolutionTreeNodeKind.Project, project.Name, project.FileName));
+                    }
+                    // Solution folders (collapsed until expanded) follow the
+                    // root-level projects.
+                    foreach (var folderName in solution.SolutionFolderNames)
+                        children.Append(SolutionTreeNode.Create(SolutionTreeNodeKind.SolutionFolder, folderName, default));
+                    break;
+
+                case SolutionTreeNodeKind.SolutionFolder:
+                    if (IdeApp.CurrentSolution is not { } currentSolution)
+                        return null;
+                    foreach (var project in currentSolution.Projects)
+                    {
+                        if (project.SolutionFolder == node.Title)
+                            children.Append(SolutionTreeNode.Create(SolutionTreeNodeKind.Project, project.Name, project.FileName));
+                    }
                     break;
 
                 case SolutionTreeNodeKind.Project:

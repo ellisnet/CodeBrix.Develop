@@ -2,6 +2,7 @@ using System;
 using System.IO;
 using System.Linq;
 using CodeBrix.Develop.Core.Options;
+using CodeBrix.Sqlite;
 using SilverAssertions;
 using Xunit;
 
@@ -9,20 +10,40 @@ namespace CodeBrix.Develop.Core.Tests;
 
 public class OptionsStoreTests : IDisposable
 {
+    readonly string root;
     readonly string directory;
+    readonly string externalDirectory;
 
     public OptionsStoreTests()
     {
-        directory = Path.Combine(Path.GetTempPath(), "codebrix-develop-tests", Path.GetRandomFileName());
+        root = Path.Combine(Path.GetTempPath(), "codebrix-develop-tests", Path.GetRandomFileName());
+        directory = Path.Combine(root, "options");
+        externalDirectory = Path.Combine(root, "external");
     }
 
     public void Dispose()
     {
-        try { Directory.Delete(directory, recursive: true); } catch { /* best effort */ }
+        try { Directory.Delete(root, recursive: true); } catch { /* best effort */ }
     }
 
     OptionsStore CreateStore(DateTime? now = null) =>
         new OptionsStore(directory, now == null ? null : () => now.Value);
+
+    string ExternalPath(string name)
+    {
+        Directory.CreateDirectory(externalDirectory);
+        return Path.Combine(externalDirectory, name);
+    }
+
+    // Builds a valid options.sqlite (in its own folder outside the store
+    // under test) holding the given value, and returns its path.
+    string CreateExternalOptionsFile(string key, string value)
+    {
+        var sourceDirectory = Path.Combine(externalDirectory, Path.GetRandomFileName());
+        using (var source = new OptionsStore(sourceDirectory, () => new DateTime(2026, 1, 1, 0, 0, 0)))
+            source.Set(key, value);
+        return Path.Combine(sourceDirectory, "options.sqlite");
+    }
 
     static string BackupName(string timestamp) => $"options_auto_backup_{timestamp}.sqlite";
 
@@ -282,5 +303,133 @@ public class OptionsStoreTests : IDisposable
 
         //Assert
         store.Get("CodeBrix.Test.Typed", 5).Should().Be(5);
+    }
+
+    [Fact]
+    public void Export_writes_a_complete_self_contained_copy()
+    {
+        //Arrange
+        using var store = CreateStore();
+        store.Set("CodeBrix.Test.Exported", "travels");
+        var exportPath = ExternalPath("my-settings.sqlite");
+
+        //Act
+        store.ExportToFile(exportPath);
+
+        //Assert — the single exported file, used as options.sqlite of a
+        // brand-new installation, carries the value with no companion files.
+        File.Exists(exportPath).Should().BeTrue();
+        File.Exists(exportPath + "-wal").Should().BeFalse();
+        File.Exists(exportPath + "-shm").Should().BeFalse();
+        var otherInstallation = Path.Combine(root, "other-installation");
+        Directory.CreateDirectory(otherInstallation);
+        File.Copy(exportPath, Path.Combine(otherInstallation, "options.sqlite"));
+        using var reopened = new OptionsStore(otherInstallation);
+        reopened.Get<string>("CodeBrix.Test.Exported").Should().Be("travels");
+    }
+
+    [Fact]
+    public void Export_into_the_options_folder_is_rejected()
+    {
+        //Arrange
+        using var store = CreateStore();
+
+        //Act
+        Action direct = () => store.ExportToFile(Path.Combine(directory, "copy.sqlite"));
+        Action nested = () => store.ExportToFile(Path.Combine(directory, "sub", "copy.sqlite"));
+
+        //Assert
+        direct.Should().Throw<InvalidOperationException>();
+        nested.Should().Throw<InvalidOperationException>();
+    }
+
+    [Fact]
+    public void Import_stages_a_validated_incoming_file()
+    {
+        //Arrange
+        using var store = CreateStore();
+        var sourcePath = CreateExternalOptionsFile("CodeBrix.Test.Imported", "incoming");
+
+        //Act
+        store.StageIncomingFile(sourcePath);
+
+        //Assert
+        File.Exists(Path.Combine(directory, "options_incoming.sqlite")).Should().BeTrue();
+    }
+
+    [Fact]
+    public void Import_rejects_a_non_database_file()
+    {
+        //Arrange
+        using var store = CreateStore();
+        var sourcePath = ExternalPath("not-a-database.sqlite");
+        File.WriteAllText(sourcePath, "this is not a sqlite database");
+
+        //Act
+        Action act = () => store.StageIncomingFile(sourcePath);
+
+        //Assert
+        act.Should().Throw<InvalidDataException>();
+        File.Exists(Path.Combine(directory, "options_incoming.sqlite")).Should().BeFalse();
+    }
+
+    [Fact]
+    public void Import_rejects_a_database_without_the_option_table()
+    {
+        //Arrange — a healthy SQLite database that is not an options file.
+        using var store = CreateStore();
+        var sourcePath = ExternalPath("other-database.sqlite");
+        using (var other = new SqliteDatabase(sourcePath, null, new SqliteDatabaseOptions()))
+        {
+            other.SafeOpen();
+            other.ExecuteNonQuery("CREATE TABLE NotOptions (Id INTEGER PRIMARY KEY)");
+        }
+
+        //Act
+        Action act = () => store.StageIncomingFile(sourcePath);
+
+        //Assert
+        act.Should().Throw<InvalidDataException>();
+        File.Exists(Path.Combine(directory, "options_incoming.sqlite")).Should().BeFalse();
+    }
+
+    [Fact]
+    public void Incoming_file_is_adopted_on_startup()
+    {
+        //Arrange — a store holding the old value, with an import staged.
+        var sourcePath = CreateExternalOptionsFile("CodeBrix.Test.Key", "new");
+        using (var store = CreateStore(new DateTime(2026, 7, 1, 0, 0, 0)))
+        {
+            store.Set("CodeBrix.Test.Key", "old");
+            store.StageIncomingFile(sourcePath);
+        }
+
+        //Act
+        using var reopened = CreateStore(new DateTime(2026, 7, 5, 12, 30, 45));
+
+        //Assert — the import took over; the previous file was kept.
+        reopened.WasReplacedByImport.Should().BeTrue();
+        reopened.WasCreatedFresh.Should().BeFalse();
+        reopened.Get<string>("CodeBrix.Test.Key").Should().Be("new");
+        File.Exists(Path.Combine(directory, "options_incoming.sqlite")).Should().BeFalse();
+        File.Exists(Path.Combine(directory, "options_old_2026-07-05_12-30-45.sqlite")).Should().BeTrue();
+    }
+
+    [Fact]
+    public void Adoption_without_an_existing_options_file_uses_the_incoming_file_directly()
+    {
+        //Arrange — a staged import in a folder with no options.sqlite yet.
+        var sourcePath = CreateExternalOptionsFile("CodeBrix.Test.Key", "fresh-import");
+        Directory.CreateDirectory(directory);
+        using (var source = new OptionsStore(Path.GetDirectoryName(sourcePath)))
+            source.ExportToFile(Path.Combine(directory, "options_incoming.sqlite"));
+
+        //Act
+        using var store = CreateStore(new DateTime(2026, 7, 5, 12, 30, 45));
+
+        //Assert
+        store.WasReplacedByImport.Should().BeTrue();
+        store.Get<string>("CodeBrix.Test.Key").Should().Be("fresh-import");
+        Directory.EnumerateFiles(directory, "options_old_*.sqlite").Should().BeEmpty();
     }
 }

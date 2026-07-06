@@ -18,7 +18,9 @@ namespace CodeBrix.Develop.Core.Projects;
 
 /// <summary>
 /// A solution loaded from a .sln (classic), .slnx (XML), or single .csproj
-/// file, holding the set of .NET projects it references.
+/// file, holding the set of .NET projects it references — including shared
+/// projects (.shproj), which appear as projects but are never built or
+/// loaded into the type system themselves.
 /// </summary>
 public class Solution
 {
@@ -28,6 +30,7 @@ public class Solution
         RegexOptions.Compiled);
 
     readonly List<DotNetProject> projects = new List<DotNetProject>();
+    readonly List<string> solutionFolderNames = new List<string>();
 
     /// <summary>The full path of the solution file.</summary>
     public FilePath FileName { get; private set; }
@@ -40,6 +43,14 @@ public class Solution
 
     /// <summary>The projects in this solution, in declaration order.</summary>
     public IReadOnlyList<DotNetProject> Projects => projects;
+
+    /// <summary>
+    /// The distinct solution-folder names (e.g. "Libraries", "Tests") in
+    /// declaration order; projects report theirs via
+    /// <see cref="DotNetProject.SolutionFolder"/>. Only .slnx solutions
+    /// carry folders — classic .sln folder nesting is not read.
+    /// </summary>
+    public IReadOnlyList<string> SolutionFolderNames => solutionFolderNames;
 
     /// <summary>The first executable project, used as the default run target.</summary>
     public DotNetProject StartupProject => projects.FirstOrDefault(p => p.IsExecutable);
@@ -55,21 +66,21 @@ public class Solution
 
         var solution = new Solution { FileName = fileName.FullPath };
 
-        IEnumerable<FilePath> projectPaths;
+        IEnumerable<(FilePath Path, string Folder)> projectEntries;
         if (fileName.HasExtension(".slnx"))
-            projectPaths = ParseSlnx(solution.FileName);
+            projectEntries = ParseSlnx(solution.FileName);
         else if (fileName.HasExtension(".sln"))
-            projectPaths = ParseSln(solution.FileName);
+            projectEntries = ParseSln(solution.FileName).Select(path => (path, ""));
         else if (fileName.Extension.EndsWith("proj", StringComparison.OrdinalIgnoreCase))
-            projectPaths = new[] { solution.FileName };
+            projectEntries = new[] { (solution.FileName, "") };
         else
             throw new NotSupportedException($"Unsupported solution format: {fileName.Extension}");
 
-        foreach (var path in projectPaths)
+        foreach (var (path, folder) in projectEntries)
         {
-            if (!path.HasExtension(".csproj"))
+            if (!path.HasExtension(".csproj") && !path.HasExtension(".shproj"))
             {
-                LoggingService.LogWarning($"Skipping non-C# project: {path}");
+                LoggingService.LogWarning($"Skipping unsupported project type: {path}");
                 continue;
             }
             if (!File.Exists(path))
@@ -77,7 +88,11 @@ public class Solution
                 LoggingService.LogWarning($"Skipping missing project: {path}");
                 continue;
             }
-            solution.projects.Add(DotNetProject.Load(path));
+            var project = DotNetProject.Load(path);
+            project.SolutionFolder = folder;
+            if (folder.Length > 0 && !solution.solutionFolderNames.Contains(folder))
+                solution.solutionFolderNames.Add(folder);
+            solution.projects.Add(project);
         }
 
         return solution;
@@ -99,7 +114,7 @@ public class Solution
         }
     }
 
-    static IEnumerable<FilePath> ParseSlnx(FilePath fileName)
+    static IEnumerable<(FilePath Path, string Folder)> ParseSlnx(FilePath fileName)
     {
         var baseDirectory = fileName.ParentDirectory;
         var doc = XDocument.Load(fileName);
@@ -109,7 +124,11 @@ public class Solution
             if (string.IsNullOrEmpty(path))
                 continue;
             var relative = path.Replace('\\', Path.DirectorySeparatorChar);
-            yield return baseDirectory.Combine(relative).FullPath;
+            // The enclosing <Folder Name="/Tests/"> (if any) names the
+            // solution folder; the Name attribute carries the full
+            // slash-delimited path.
+            var folder = element.Ancestors("Folder").FirstOrDefault()?.Attribute("Name")?.Value ?? "";
+            yield return (baseDirectory.Combine(relative).FullPath, folder.Trim('/'));
         }
     }
 }

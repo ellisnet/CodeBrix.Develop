@@ -57,6 +57,8 @@ static class ThemeCssGenerator
         var scrollSliderHov = Col("rgba(100, 100, 100, 0.7)", "rgba(100, 100, 100, 0.7)", "scrollbarSlider.hoverBackground");
         var selectionBg = Col("#264F78", "#ADD6FF", "editor.selectionBackground");
         var focusBorder = Col("#007FD4", "#0090F1", "focusBorder");
+        var errorFg = Col("#F48771", "#A1260D", "errorForeground");
+        var errorBorder = Col("#BE1100", "#BE1100", "inputValidation.errorBorder", "errorForeground");
 
         var css = new StringBuilder();
         css.AppendLine($$"""
@@ -152,6 +154,12 @@ static class ThemeCssGenerator
                 background-color: {{inputBg}};
                 color: {{inputFg}};
             }
+            entry.error, entry.error > text {
+                border: 1px solid {{errorBorder}};
+            }
+            label.cb-error {
+                color: {{errorFg}};
+            }
 
             button {
                 background-image: none;
@@ -174,6 +182,9 @@ static class ThemeCssGenerator
             }
             button.suggested-action:hover {
                 background-color: {{buttonHovBg}};
+            }
+            button:disabled, button.suggested-action:disabled {
+                opacity: 0.4;
             }
 
             dropdown > button, dropdown listview {

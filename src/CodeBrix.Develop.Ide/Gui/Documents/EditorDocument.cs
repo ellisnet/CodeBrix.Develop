@@ -11,7 +11,9 @@ using System;
 using System.IO;
 using System.Threading.Tasks;
 using CodeBrix.Develop.Core;
+using CodeBrix.Develop.Core.Debugging;
 using CodeBrix.Develop.Core.TypeSystem;
+using CodeBrix.Develop.Ide.Debugging;
 using CodeBrix.Develop.Ide.Gui.Completion;
 using Gdk = CodeBrix.Develop.UI.Gdk;
 using Gtk = CodeBrix.Develop.UI.Gtk;
@@ -25,10 +27,23 @@ namespace CodeBrix.Develop.Ide.Gui.Documents;
 /// </summary>
 public class EditorDocument
 {
+    const string BreakpointCategory = "codebrix-breakpoint";
+    const string ExecutionCategory = "codebrix-execution";
+
     readonly Gtk.ScrolledWindow scrolled;
     readonly GtkSource.View view;
     readonly GtkSource.Buffer buffer;
     readonly CompletionPopup completionPopup;
+    // Controllers marshalled to native code: keep strong references.
+    readonly Gtk.GestureClick gutterClick;
+    readonly Gtk.EventControllerMotion hoverMotion;
+    readonly Action<FilePath> breakpointsChangedHandler;
+    readonly Gtk.Popover hoverPopover;
+    readonly Gtk.Label hoverLabel;
+    readonly Gtk.EventControllerMotion popoverMotion;
+    readonly System.Threading.SynchronizationContext? uiContext;
+    string? hoverExpression;
+    bool pointerInPopover;
 
     /// <summary>The file shown in this document.</summary>
     public FilePath FileName { get; }
@@ -49,6 +64,7 @@ public class EditorDocument
     public EditorDocument(FilePath fileName)
     {
         FileName = fileName.FullPath;
+        uiContext = System.Threading.SynchronizationContext.Current;
 
         buffer = GtkSource.Buffer.New(null);
         ApplyLanguage();
@@ -71,10 +87,228 @@ public class EditorDocument
         completionPopup = new CompletionPopup(view);
         completionPopup.ItemCommitted += CommitCompletionItem;
 
+        // Debugging: breakpoint + execution marks in the gutter, click on a
+        // line number to toggle a breakpoint, hover a variable for its value
+        // while paused.
+        view.SetShowLineMarks(true);
+        var breakpointAttributes = GtkSource.MarkAttributes.New();
+        if (ImageService.GetPixbuf("gutter-breakpoint-15") is { } breakpointPixbuf)
+            breakpointAttributes.SetPixbuf(breakpointPixbuf);
+        view.SetMarkAttributes(BreakpointCategory, breakpointAttributes, 10);
+
+        var executionAttributes = GtkSource.MarkAttributes.New();
+        if (ImageService.GetPixbuf("gutter-execution-15") is { } executionPixbuf)
+            executionAttributes.SetPixbuf(executionPixbuf);
+        var executionBackground = new Gdk.RGBA();
+        if (executionBackground.Parse("rgba(255, 220, 0, 0.22)"))
+            executionAttributes.SetBackground(executionBackground);
+        view.SetMarkAttributes(ExecutionCategory, executionAttributes, 20);
+
+        // Attached to the view (not the gutter widget — its internal
+        // renderers swallow presses) in the capture phase; a press whose x
+        // falls inside the gutter's width toggles the breakpoint.
+        gutterClick = Gtk.GestureClick.New();
+        gutterClick.SetButton(1);
+        gutterClick.SetPropagationPhase(Gtk.PropagationPhase.Capture);
+        gutterClick.OnPressed += (_, args) => OnViewPressed(args.X, args.Y);
+        view.AddController(gutterClick);
+
+        hoverMotion = Gtk.EventControllerMotion.New();
+        hoverMotion.OnMotion += (_, args) => OnPointerMotion(args.X, args.Y);
+        // Leaving the view often means entering the value popover (to select
+        // or copy the value) — hide only if the pointer is not in it shortly.
+        hoverMotion.OnLeave += (_, _) => _ = HideHoverAfterDelayAsync();
+        view.AddController(hoverMotion);
+
+        // Built up front like the completion popup — parenting a popover
+        // lazily from an async continuation does not render reliably.
+        hoverLabel = Gtk.Label.New(null);
+        hoverLabel.SetSelectable(true);
+        hoverLabel.SetWrap(true);
+        hoverLabel.SetMaxWidthChars(100);
+        hoverLabel.SetXalign(0);
+        var copyButton = Gtk.Button.NewWithLabel("Copy");
+        copyButton.SetHalign(Gtk.Align.End);
+        copyButton.OnClicked += (_, _) => view.GetClipboard().SetText(hoverLabel.GetText());
+        var hoverBox = Gtk.Box.New(Gtk.Orientation.Vertical, 6);
+        hoverBox.SetMarginStart(8);
+        hoverBox.SetMarginEnd(8);
+        hoverBox.SetMarginTop(6);
+        hoverBox.SetMarginBottom(6);
+        hoverBox.Append(hoverLabel);
+        hoverBox.Append(copyButton);
+        hoverPopover = Gtk.Popover.New();
+        hoverPopover.SetChild(hoverBox);
+        hoverPopover.SetAutohide(false); // never steal focus from the editor
+        hoverPopover.SetParent(view);
+        popoverMotion = Gtk.EventControllerMotion.New();
+        popoverMotion.OnEnter += (_, _) => pointerInPopover = true;
+        popoverMotion.OnLeave += (_, _) =>
+        {
+            pointerInPopover = false;
+            HideHoverPopover();
+        };
+        hoverBox.AddController(popoverMotion);
+
+        breakpointsChangedHandler = OnBreakpointsChanged;
+        DebugService.Breakpoints.Changed += breakpointsChangedHandler;
+        ApplyBreakpointMarks();
+
         scrolled = Gtk.ScrolledWindow.New();
         scrolled.SetChild(view);
         scrolled.SetHexpand(true);
         scrolled.SetVexpand(true);
+    }
+
+    /// <summary>Detaches shared-event subscriptions; call when the document closes.</summary>
+    public void OnClosed() => DebugService.Breakpoints.Changed -= breakpointsChangedHandler;
+
+    /// <summary>Toggles a breakpoint on the caret's line (the F9 command).</summary>
+    public void ToggleBreakpointAtCaret()
+    {
+        buffer.GetIterAtMark(out var caret, buffer.GetInsert());
+        DebugService.Breakpoints.Toggle(FileName, caret.GetLine() + 1);
+    }
+
+    void OnViewPressed(double x, double y)
+    {
+        // Only presses on the gutter (line numbers + marks) toggle breakpoints.
+        var gutterWidth = view.GetGutter(Gtk.TextWindowType.Left).GetWidth();
+        if (x < 0 || x >= gutterWidth)
+            return;
+        view.WindowToBufferCoords(Gtk.TextWindowType.Widget, (int) x, (int) y, out _, out var bufferY);
+        view.GetLineAtY(out var iter, bufferY, out _);
+        var line = iter.GetLine() + 1; // TextIter lines are 0-based
+        DebugService.Breakpoints.Toggle(FileName, line);
+    }
+
+    void OnBreakpointsChanged(FilePath file)
+    {
+        if (file == FileName)
+            ApplyBreakpointMarks();
+    }
+
+    void ApplyBreakpointMarks()
+    {
+        buffer.GetBounds(out var start, out var end);
+        buffer.RemoveSourceMarks(start, end, BreakpointCategory);
+        var lineCount = buffer.GetLineCount();
+        foreach (var line in DebugService.Breakpoints.GetLines(FileName))
+        {
+            if (line < 1 || line > lineCount)
+                continue;
+            buffer.GetIterAtLine(out var iter, line - 1);
+            buffer.CreateSourceMark(null, BreakpointCategory, iter);
+        }
+    }
+
+    /// <summary>
+    /// Marks the given 1-based line as the paused execution location:
+    /// gutter arrow, line background, cursor placed, and scrolled into view.
+    /// </summary>
+    public void ShowExecutionLine(int line)
+    {
+        ClearExecutionLine();
+        if (line < 1 || line > buffer.GetLineCount())
+            return;
+        buffer.GetIterAtLine(out var iter, line - 1);
+        buffer.CreateSourceMark(null, ExecutionCategory, iter);
+        ScrollToLine(line);
+    }
+
+    /// <summary>Places the cursor on the 1-based line and scrolls it into view.</summary>
+    public void ScrollToLine(int line)
+    {
+        if (line < 1 || line > buffer.GetLineCount())
+            return;
+        buffer.GetIterAtLine(out var iter, line - 1);
+        buffer.PlaceCursor(iter);
+        view.ScrollToIter(iter, withinMargin: 0.15, useAlign: false, xalign: 0, yalign: 0);
+    }
+
+    /// <summary>Removes the execution-location mark (the debuggee resumed).</summary>
+    public void ClearExecutionLine()
+    {
+        buffer.GetBounds(out var start, out var end);
+        buffer.RemoveSourceMarks(start, end, ExecutionCategory);
+        HideHoverPopover();
+    }
+
+    void OnPointerMotion(double x, double y)
+    {
+        if (!IsCSharp || !DebugService.IsPaused)
+        {
+            HideHoverPopover();
+            return;
+        }
+
+        view.WindowToBufferCoords(Gtk.TextWindowType.Widget, (int) x, (int) y, out var bufferX, out var bufferY);
+        view.GetIterAtLocation(out var iter, bufferX, bufferY);
+        var lineStart = iter.Copy();
+        lineStart.SetLineOffset(0);
+        var lineEnd = iter.Copy();
+        if (!lineEnd.EndsLine())
+            lineEnd.ForwardToLineEnd();
+        var lineText = buffer.GetText(lineStart, lineEnd, includeHiddenChars: true);
+        var expression = HoverExpression.At(lineText, iter.GetLineOffset());
+
+        if (expression == hoverExpression)
+            return;
+        hoverExpression = expression;
+        if (expression == null)
+        {
+            HideHoverPopover();
+            return;
+        }
+
+        // Anchor the value bubble to the hovered line's rectangle, NOT the
+        // raw pointer position: a bubble opening under the pointer makes the
+        // pointer "leave" the view, which would immediately hide it again.
+        view.GetIterLocation(iter, out var location);
+        view.BufferToWindowCoords(Gtk.TextWindowType.Widget, location.X, location.Y, out var anchorX, out var anchorY);
+        _ = ShowHoverValueAsync(expression, anchorX, anchorY, location.Height);
+    }
+
+    async Task ShowHoverValueAsync(string expression, int anchorX, int anchorY, int lineHeight)
+    {
+        try
+        {
+            var result = await DebugService.EvaluateAsync(expression);
+            if (result == null)
+                return;
+            // GTK work must happen on the main loop; the await above may
+            // have resumed on the debugger's read thread.
+            (uiContext ?? throw new InvalidOperationException("No UI context")).Post(_ =>
+            {
+                // The pointer may have moved on (or the debuggee resumed) meanwhile.
+                if (expression != hoverExpression || !DebugService.IsPaused)
+                    return;
+                hoverLabel.SetText(result.Success ? $"{expression} = {result.Text}" : result.Text);
+                var rect = new Gdk.Rectangle { X = anchorX, Y = anchorY, Width = 1, Height = lineHeight };
+                hoverPopover.SetPointingTo(rect);
+                hoverPopover.Popup();
+            }, null);
+        }
+        catch (Exception ex)
+        {
+            LoggingService.LogError($"Hover evaluation of '{expression}' failed", ex);
+        }
+    }
+
+    async Task HideHoverAfterDelayAsync()
+    {
+        await Task.Delay(300);
+        uiContext?.Post(_ =>
+        {
+            if (!pointerInPopover)
+                HideHoverPopover();
+        }, null);
+    }
+
+    void HideHoverPopover()
+    {
+        hoverExpression = null;
+        hoverPopover?.Popdown();
     }
 
     void ApplyLanguage()

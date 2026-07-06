@@ -57,6 +57,9 @@ public abstract class OptionsPanel : IOptionsPanel, IDisposable
     public virtual bool ValidateChanges() => true;
 
     /// <inheritdoc/>
+    public virtual bool HasUnsavedChanges() => false;
+
+    /// <inheritdoc/>
     public abstract void ApplyChanges();
 
     /// <inheritdoc/>

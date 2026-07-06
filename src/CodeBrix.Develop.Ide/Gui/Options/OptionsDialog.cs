@@ -135,6 +135,38 @@ public class OptionsDialog
         window.AddController(shortcuts);
     }
 
+    /// <summary>
+    /// The window hosting the dialog; panels use it as the parent for file
+    /// and alert dialogs they raise.
+    /// </summary>
+    public Gtk.Window Window => window;
+
+    /// <summary>Whether any instantiated panel holds changes not yet applied.</summary>
+    public bool HasUnsavedChanges => pages.Any(page => page.Panel != null && page.Panel.HasUnsavedChanges());
+
+    /// <summary>
+    /// Validates and applies every instantiated panel — the OK behavior
+    /// without closing the dialog. Returns false (showing the offending
+    /// page) when validation fails.
+    /// </summary>
+    public bool TryApplyAllChanges()
+    {
+        foreach (var page in pages)
+        {
+            if (page.Panel != null && !page.Panel.ValidateChanges())
+            {
+                if (page.Row != null)
+                    sectionList.SelectRow(page.Row);
+                return false; // stay open on the offending page
+            }
+        }
+        foreach (var page in pages)
+            page.Panel?.ApplyChanges();
+        applied = true;
+        RememberCurrentPage();
+        return true;
+    }
+
     /// <summary>Shows the dialog, restoring the last-visited page.</summary>
     public void Present()
     {
@@ -202,20 +234,8 @@ public class OptionsDialog
 
     void ConfirmAndClose()
     {
-        foreach (var page in pages)
-        {
-            if (page.Panel != null && !page.Panel.ValidateChanges())
-            {
-                if (page.Row != null)
-                    sectionList.SelectRow(page.Row);
-                return; // stay open on the offending page
-            }
-        }
-        foreach (var page in pages)
-            page.Panel?.ApplyChanges();
-        applied = true;
-        RememberCurrentPage();
-        window.Close();
+        if (TryApplyAllChanges())
+            window.Close();
     }
 
     void CancelInstantiatedPanels()

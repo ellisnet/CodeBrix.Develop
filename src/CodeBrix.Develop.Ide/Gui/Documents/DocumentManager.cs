@@ -95,6 +95,7 @@ public class DocumentManager
         // First-pass policy: never lose work — modified documents are saved
         // on close (a save/discard prompt comes later).
         document.Save();
+        document.OnClosed();
         var page = notebook.PageNum(document.Widget);
         if (page >= 0)
             notebook.RemovePage(page);

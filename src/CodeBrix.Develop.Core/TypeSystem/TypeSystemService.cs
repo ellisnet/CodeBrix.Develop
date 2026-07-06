@@ -68,6 +68,11 @@ public static class TypeSystemService
             foreach (var project in solution.Projects)
             {
                 cancellationToken.ThrowIfCancellationRequested();
+                // Shared projects (.shproj) are not MSBuild-loadable; their
+                // files reach Roslyn through each head project that imports
+                // the sibling .projitems.
+                if (project.IsSharedProject)
+                    continue;
                 if (workspace.CurrentSolution.Projects.Any(p => string.Equals(p.FilePath, project.FileName, StringComparison.Ordinal)))
                     continue;
                 progress?.Report($"Loading {project.Name} into the type system...");
