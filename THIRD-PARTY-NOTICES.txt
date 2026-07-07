@@ -53,6 +53,22 @@ General Public License, version 2.1 (LGPL 2.1). Accordingly:
     none of them may be imported into this project or repository.
 
 --------------------------------------------------------------------------------
+MonoDevelop.Xml
+https://github.com/mhutch/MonoDevelop.Xml
+License: MIT
+Copyright (c) Xamarin Inc., Microsoft Corp., and MonoDevelop.Xml
+contributors
+
+The error-tolerant XML parser, DOM, completion-triggering, and diagnostic
+types under src/CodeBrix.Develop.Core/Xml/ (namespaces
+CodeBrix.Develop.Core.Xml.Dom / .Parser / .Completion / .Analysis) are
+adapted from the Core library of the MonoDevelop.Xml repository (commit
+acce64b62dc90f6da0d8c70346ed14e33184d90d). They power the IDE's XAML
+editing intelligence. Each adapted file retains its original MIT license
+header and authorship credits and carries a
+"//was previously: <upstream-namespace>" comment on the namespace line.
+
+--------------------------------------------------------------------------------
 Visual Studio Code — color theme definition files
 https://github.com/microsoft/vscode
 License: MIT

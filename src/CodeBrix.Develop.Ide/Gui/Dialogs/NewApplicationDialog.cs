@@ -20,8 +20,9 @@ namespace CodeBrix.Develop.Ide.Gui.Dialogs;
 /// <summary>
 /// The File &gt; New &gt; CodeBrix.Platform Application dialog: application
 /// name, location (defaulting to the projects folder from Options), the six
-/// platform head check boxes (all checked initially; at least one required),
-/// and optional extra library assemblies. Create resolves the latest NuGet
+/// platform head check boxes grouped by operating system (only the stable
+/// head of each group is checked initially; at least one required), and
+/// optional extra library assemblies. Create resolves the latest NuGet
 /// package versions, generates the application, and reports the new .slnx.
 /// </summary>
 public class NewApplicationDialog
@@ -42,6 +43,28 @@ public class NewApplicationDialog
 
     /// <summary>Raised with the path of the generated .slnx after a successful Create.</summary>
     public event Action<FilePath>? Created;
+
+    // The heads offered, grouped by operating system. Within each group
+    // only the stable head starts checked; the help text is shown in
+    // italics beside each check box.
+    static readonly (string Heading, (PlatformHead Head, string Label, string Help, bool Checked)[] Heads)[] HeadGroups =
+    {
+        ("Linux", new[]
+        {
+            (PlatformHead.LinuxX11, "X11", "(stable, compatible)", true),
+            (PlatformHead.LinuxWayland, "Wayland", "(cutting-edge)", false),
+            (PlatformHead.LinuxFrameBuffer, "Frame Buffer", "(kiosk-mode)", false),
+        }),
+        ("Apple Mac", new[]
+        {
+            (PlatformHead.MacOS, "macOS", "(stable)", true),
+        }),
+        ("Microsoft Windows", new[]
+        {
+            (PlatformHead.Win32Skia, "Win32 Skia", "(stable)", true),
+            (PlatformHead.WinWpfSkia, "WPF Skia", "(legacy)", false),
+        }),
+    };
 
     /// <summary>Creates the dialog over the given parent window.</summary>
     public NewApplicationDialog(Gtk.Window parent)
@@ -78,13 +101,31 @@ public class NewApplicationDialog
         var headsLabel = Gtk.Label.New("Platform heads:");
         headsLabel.SetXalign(0);
         var headsBox = Gtk.Box.New(Gtk.Orientation.Vertical, 2);
-        foreach (var info in PlatformHeadInfo.All)
+        foreach (var (heading, heads) in HeadGroups)
         {
-            var check = Gtk.CheckButton.NewWithLabel(info.DisplayName);
-            check.SetActive(true);
-            check.OnToggled += (_, _) => Validate();
-            headChecks.Add((info, check));
-            headsBox.Append(check);
+            var headingLabel = Gtk.Label.New(null);
+            headingLabel.SetMarkup($"<b>{heading}</b>");
+            headingLabel.SetXalign(0);
+            headingLabel.SetMarginTop(4);
+            headsBox.Append(headingLabel);
+            foreach (var (head, label, help, isChecked) in heads)
+            {
+                var check = Gtk.CheckButton.NewWithLabel(label);
+                check.SetActive(isChecked);
+                check.OnToggled += (_, _) => Validate();
+                headChecks.Add((PlatformHeadInfo.Get(head), check));
+
+                var helpLabel = Gtk.Label.New(null);
+                helpLabel.SetMarkup($"<i>{help}</i>");
+                helpLabel.SetXalign(0);
+                helpLabel.AddCssClass("dim-label");
+
+                var row = Gtk.Box.New(Gtk.Orientation.Horizontal, 8);
+                row.SetMarginStart(12);
+                row.Append(check);
+                row.Append(helpLabel);
+                headsBox.Append(row);
+            }
         }
 
         var fontLabel = Gtk.Label.New("Application font:");

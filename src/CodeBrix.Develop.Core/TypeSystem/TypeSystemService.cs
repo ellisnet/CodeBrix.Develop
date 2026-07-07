@@ -14,6 +14,7 @@ using System.Threading;
 using System.Threading.Tasks;
 using Microsoft.Build.Locator;
 using Microsoft.CodeAnalysis;
+using Microsoft.CodeAnalysis.Classification;
 using Microsoft.CodeAnalysis.Completion;
 using Microsoft.CodeAnalysis.MSBuild;
 using Microsoft.CodeAnalysis.Text;
@@ -91,7 +92,14 @@ public static class TypeSystemService
     {
         workspace?.Dispose();
         workspace = null;
+        WorkspaceUnloaded?.Invoke();
     }
+
+    /// <summary>Raised when the current workspace is unloaded (caches must drop).</summary>
+    public static event Action WorkspaceUnloaded;
+
+    /// <summary>The current Roslyn solution snapshot, or null.</summary>
+    internal static Microsoft.CodeAnalysis.Solution CurrentRoslynSolution => workspace?.CurrentSolution;
 
     static Document GetDocumentWithText(FilePath file, string bufferText)
     {
@@ -136,6 +144,7 @@ public static class TypeSystemService
             {
                 DisplayText = item.DisplayText,
                 SortText = item.SortText,
+                FilterText = item.FilterText,
                 Tags = item.Tags,
                 ReplacementStart = item.Span.Start,
                 ReplacementLength = item.Span.Length,
@@ -149,19 +158,97 @@ public static class TypeSystemService
     }
 
     /// <summary>
-    /// Computes compiler diagnostics for the given file, using
-    /// <paramref name="bufferText"/> as the current document text.
+    /// Whether typing <paramref name="typedChar"/> (whose caret now sits at
+    /// UTF-16 offset <paramref name="caretOffset"/>, just after the char)
+    /// should automatically open code completion.
     /// </summary>
-    public static async Task<IReadOnlyList<Diagnostic>> GetDiagnosticsAsync(FilePath file, string bufferText, CancellationToken cancellationToken = default)
+    public static bool ShouldTriggerCompletion(FilePath file, string bufferText, int caretOffset, char typedChar)
     {
         var document = GetDocumentWithText(file, bufferText);
         if (document == null)
-            return Array.Empty<Diagnostic>();
+            return false;
+        var completionService = CompletionService.GetService(document);
+        if (completionService == null)
+            return false;
+        var trigger = CompletionTrigger.CreateInsertionTrigger(typedChar);
+        return completionService.ShouldTriggerCompletion(SourceText.From(bufferText), caretOffset, trigger);
+    }
+
+    /// <summary>
+    /// Computes the classified (syntax + semantic) spans of the whole
+    /// document, used for semantic highlighting in the editor.
+    /// </summary>
+    public static async Task<IReadOnlyList<ClassifiedSpanInfo>> GetClassifiedSpansAsync(FilePath file, string bufferText, CancellationToken cancellationToken = default)
+    {
+        var document = GetDocumentWithText(file, bufferText);
+        if (document == null)
+            return Array.Empty<ClassifiedSpanInfo>();
+
+        var spans = await Classifier.GetClassifiedSpansAsync(
+            document, new TextSpan(0, bufferText.Length), cancellationToken).ConfigureAwait(false);
+        var results = new List<ClassifiedSpanInfo>();
+        foreach (var span in spans)
+        {
+            results.Add(new ClassifiedSpanInfo
+            {
+                Start = span.TextSpan.Start,
+                Length = span.TextSpan.Length,
+                Classification = span.ClassificationType,
+            });
+        }
+        return results;
+    }
+
+    /// <summary>
+    /// Computes signature help (parameter hints) at the given UTF-16
+    /// offset, or null when the caret is not inside an argument list.
+    /// </summary>
+    public static async Task<SignatureHelpResult> GetSignatureHelpAsync(FilePath file, string bufferText, int offset, CancellationToken cancellationToken = default)
+    {
+        var document = GetDocumentWithText(file, bufferText);
+        if (document == null)
+            return null;
+        var semanticModel = await document.GetSemanticModelAsync(cancellationToken).ConfigureAwait(false);
+        if (semanticModel == null)
+            return null;
+        return SignatureHelpService.Compute(semanticModel, offset, cancellationToken);
+    }
+
+    /// <summary>
+    /// Computes compiler diagnostics for the given file, using
+    /// <paramref name="bufferText"/> as the current document text.
+    /// Hidden diagnostics are omitted.
+    /// </summary>
+    public static async Task<IReadOnlyList<DiagnosticInfo>> GetDiagnosticsAsync(FilePath file, string bufferText, CancellationToken cancellationToken = default)
+    {
+        var document = GetDocumentWithText(file, bufferText);
+        if (document == null)
+            return Array.Empty<DiagnosticInfo>();
 
         var semanticModel = await document.GetSemanticModelAsync(cancellationToken).ConfigureAwait(false);
         if (semanticModel == null)
-            return Array.Empty<Diagnostic>();
-        return semanticModel.GetDiagnostics(cancellationToken: cancellationToken);
+            return Array.Empty<DiagnosticInfo>();
+
+        var results = new List<DiagnosticInfo>();
+        foreach (var diagnostic in semanticModel.GetDiagnostics(cancellationToken: cancellationToken))
+        {
+            if (diagnostic.Severity == DiagnosticSeverity.Hidden)
+                continue;
+            results.Add(new DiagnosticInfo
+            {
+                Id = diagnostic.Id,
+                Message = diagnostic.GetMessage(),
+                Severity = diagnostic.Severity switch
+                {
+                    DiagnosticSeverity.Error => DiagnosticInfoSeverity.Error,
+                    DiagnosticSeverity.Warning => DiagnosticInfoSeverity.Warning,
+                    _ => DiagnosticInfoSeverity.Info,
+                },
+                Start = diagnostic.Location.SourceSpan.Start,
+                Length = diagnostic.Location.SourceSpan.Length,
+            });
+        }
+        return results;
     }
 }
 
@@ -176,6 +263,15 @@ public class CodeCompletionItem
 
     /// <summary>The text used for ordering the list.</summary>
     public string SortText { get; set; }
+
+    /// <summary>The text the typed prefix is matched against (defaults to <see cref="DisplayText"/>).</summary>
+    public string FilterText { get; set; }
+
+    /// <summary>
+    /// How many characters to move the caret back after inserting
+    /// <see cref="InsertionText"/> (e.g. 1 for <c>Property=""</c>).
+    /// </summary>
+    public int CaretBack { get; set; }
 
     /// <summary>The text inserted when the item is committed.</summary>
     public string InsertionText { get; set; }

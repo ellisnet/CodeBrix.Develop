@@ -59,6 +59,14 @@ public static class ThemeService
     /// <summary>The currently applied theme; null before <see cref="Initialize"/>.</summary>
     public static ThemeInfo? CurrentTheme { get; private set; }
 
+    /// <summary>
+    /// The full definition (workbench colors + token rules) of the current
+    /// theme, used to derive semantic-highlighting and squiggle colors so
+    /// they always match the selected theme. Null before <see cref="Initialize"/>.
+    /// </summary>
+    public static VSCodeTheme? CurrentDefinition =>
+        CurrentTheme == null ? null : GetDefinition(CurrentTheme);
+
     /// <summary>Raised after a theme has been applied (including at startup).</summary>
     public static event Action? ThemeChanged;
 

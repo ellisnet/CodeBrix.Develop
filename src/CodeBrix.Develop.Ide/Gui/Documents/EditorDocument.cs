@@ -33,16 +33,20 @@ public class EditorDocument
     readonly Gtk.ScrolledWindow scrolled;
     readonly GtkSource.View view;
     readonly GtkSource.Buffer buffer;
-    readonly CompletionPopup completionPopup;
+    readonly CompletionController completion;
+    readonly EditorAnnotations annotations;
     // Controllers marshalled to native code: keep strong references.
     readonly Gtk.GestureClick gutterClick;
     readonly Gtk.EventControllerMotion hoverMotion;
+    readonly Gtk.EventControllerScroll wheelScroll;
+    readonly Gtk.ShortcutController completionKeys;
     readonly Action<FilePath> breakpointsChangedHandler;
     readonly Gtk.Popover hoverPopover;
     readonly Gtk.Label hoverLabel;
     readonly Gtk.EventControllerMotion popoverMotion;
     readonly System.Threading.SynchronizationContext? uiContext;
     string? hoverExpression;
+    string? hoverDiagnostic;
     bool pointerInPopover;
 
     /// <summary>The file shown in this document.</summary>
@@ -56,6 +60,9 @@ public class EditorDocument
 
     /// <summary>Whether this document contains C# source (and gets Roslyn services).</summary>
     public bool IsCSharp => FileName.HasExtension(".cs");
+
+    /// <summary>Whether this document contains XAML (and gets XAML intelligence).</summary>
+    public bool IsXaml => FileName.HasExtension(".xaml") || FileName.HasExtension(".axaml");
 
     /// <summary>The widget to place in the document area.</summary>
     public Gtk.Widget Widget => scrolled;
@@ -84,8 +91,51 @@ public class EditorDocument
         view.SetInsertSpacesInsteadOfTabs(true);
         view.SetLeftMargin(4);
 
-        completionPopup = new CompletionPopup(view);
-        completionPopup.ItemCommitted += CommitCompletionItem;
+        completion = new CompletionController(
+            view, FileName, IsCSharp, IsXaml,
+            GetText, GetCaretUtf16Offset, GetCaretRectangle, CommitCompletionItem);
+        annotations = new EditorAnnotations(buffer, FileName, IsCSharp, IsXaml, GetText);
+
+        // Completion-as-you-type: the buffer signals feed the controller
+        // (insert/delete arrive before the change lands, changed after) and
+        // the annotation layer refreshes on a debounce.
+        buffer.OnInsertText += (_, args) => completion.NotifyInsert(args.Text);
+        buffer.OnDeleteRange += (_, _) => completion.NotifyDelete();
+        buffer.OnMarkSet += (_, args) =>
+        {
+            if (args.Mark.GetName() == "insert")
+                completion.NotifyCaretMoved();
+        };
+        buffer.OnChanged += (_, _) =>
+        {
+            completion.ProcessEdit();
+            annotations.ScheduleRefresh();
+        };
+
+        // While the completion list is open, navigation/commit keys belong
+        // to it. A capture-phase shortcut controller consumes them only
+        // when the controller reports the key as handled (gir.core signal
+        // handlers cannot return "handled", shortcuts can).
+        completionKeys = Gtk.ShortcutController.New();
+        completionKeys.SetPropagationPhase(Gtk.PropagationPhase.Capture);
+        foreach (var key in new[] { "Up", "Down", "Page_Up", "Page_Down", "Return", "KP_Enter", "Tab", "Escape" })
+        {
+            var keyName = key;
+            completionKeys.AddShortcut(Gtk.Shortcut.New(
+                Gtk.ShortcutTrigger.ParseString(keyName),
+                Gtk.CallbackAction.New((_, _) => completion.HandleKey(keyName))));
+        }
+        view.AddController(completionKeys);
+
+        // Wheel scrolling moves the text under the popups; dismiss them.
+        wheelScroll = Gtk.EventControllerScroll.New(Gtk.EventControllerScrollFlags.BothAxes);
+        wheelScroll.SetPropagationPhase(Gtk.PropagationPhase.Capture);
+        wheelScroll.OnScroll += (_, _) =>
+        {
+            completion.DismissAll();
+            return false; // observe only; scrolling proceeds normally
+        };
+        view.AddController(wheelScroll);
 
         // Debugging: breakpoint + execution marks in the gutter, click on a
         // line number to toggle a breakpoint, hover a variable for its value
@@ -158,6 +208,10 @@ public class EditorDocument
         scrolled.SetChild(view);
         scrolled.SetHexpand(true);
         scrolled.SetVexpand(true);
+
+        // First semantic/diagnostic pass for the freshly loaded file (it
+        // waits quietly until the type system is ready).
+        annotations.ScheduleRefresh();
     }
 
     /// <summary>Detaches shared-event subscriptions; call when the document closes.</summary>
@@ -238,7 +292,7 @@ public class EditorDocument
     {
         if (!IsCSharp || !DebugService.IsPaused)
         {
-            HideHoverPopover();
+            ShowDiagnosticHover(x, y);
             return;
         }
 
@@ -305,9 +359,38 @@ public class EditorDocument
         }, null);
     }
 
+    // Hovering a squiggled span shows its diagnostic message in the same
+    // bubble the debugger uses for values.
+    void ShowDiagnosticHover(double x, double y)
+    {
+        if (!annotations.IsActive)
+        {
+            HideHoverPopover();
+            return;
+        }
+        view.WindowToBufferCoords(Gtk.TextWindowType.Widget, (int) x, (int) y, out var bufferX, out var bufferY);
+        view.GetIterAtLocation(out var iter, bufferX, bufferY);
+        var message = annotations.GetDiagnosticMessageAt(iter.GetOffset());
+        if (message == hoverDiagnostic)
+            return;
+        hoverDiagnostic = message;
+        if (message == null)
+        {
+            HideHoverPopover();
+            return;
+        }
+        view.GetIterLocation(iter, out var location);
+        view.BufferToWindowCoords(Gtk.TextWindowType.Widget, location.X, location.Y, out var anchorX, out var anchorY);
+        hoverLabel.SetText(message);
+        var rect = new Gdk.Rectangle { X = anchorX, Y = anchorY, Width = 1, Height = location.Height };
+        hoverPopover.SetPointingTo(rect);
+        hoverPopover.Popup();
+    }
+
     void HideHoverPopover()
     {
         hoverExpression = null;
+        hoverDiagnostic = null;
         hoverPopover?.Popdown();
     }
 
@@ -331,8 +414,12 @@ public class EditorDocument
             buffer.SetStyleScheme(scheme);
     }
 
-    /// <summary>Re-applies the current color theme's editor scheme.</summary>
-    public void RefreshStyleScheme() => ApplyStyleScheme();
+    /// <summary>Re-applies the current color theme's editor scheme and annotation colors.</summary>
+    public void RefreshStyleScheme()
+    {
+        ApplyStyleScheme();
+        annotations.OnThemeChanged();
+    }
 
     /// <summary>Gives keyboard focus to the editor.</summary>
     public void Focus() => view.GrabFocus();
@@ -354,47 +441,48 @@ public class EditorDocument
     }
 
     /// <summary>
-    /// Requests Roslyn code completion at the caret and shows the completion
-    /// popup with the results.
+    /// Explicitly requests code completion at the caret (Ctrl+Space); the
+    /// as-you-type path runs through the controller's buffer signals.
     /// </summary>
-    public async Task ShowCompletionAsync()
-    {
-        if (!IsCSharp || !TypeSystemService.IsWorkspaceLoaded)
-        {
-            IdeApp.Workbench?.ShowStatus(IsCSharp ? "The type system is still loading..." : "Code completion is available for C# files");
-            return;
-        }
+    public void ShowCompletion() => completion.Invoke();
 
-        var text = GetText();
+    // The caret's offset in UTF-16 code units (what Roslyn and the XAML
+    // services count in); a C# string's Length is UTF-16 too.
+    int GetCaretUtf16Offset()
+    {
         buffer.GetIterAtMark(out var caret, buffer.GetInsert());
         buffer.GetBounds(out var start, out _);
-        // Roslyn offsets are UTF-16 code units; a C# string's Length is too
-        var utf16Offset = buffer.GetText(start, caret, includeHiddenChars: true).Length;
+        return buffer.GetText(start, caret, includeHiddenChars: true).Length;
+    }
 
-        var completions = await TypeSystemService.GetCompletionsAsync(FileName, text, utf16Offset);
-        if (completions.Count == 0)
-        {
-            IdeApp.Workbench?.ShowStatus("No completions here");
-            return;
-        }
-
+    Gdk.Rectangle GetCaretRectangle()
+    {
+        buffer.GetIterAtMark(out var caret, buffer.GetInsert());
         view.GetIterLocation(caret, out var location);
         view.BufferToWindowCoords(Gtk.TextWindowType.Widget, location.X, location.Y, out var caretX, out var caretY);
-        var rect = new Gdk.Rectangle { X = caretX, Y = caretY, Width = 1, Height = location.Height };
-        completionPopup.Show(rect, completions);
+        return new Gdk.Rectangle { X = caretX, Y = caretY, Width = 1, Height = location.Height };
     }
 
     void CommitCompletionItem(CodeCompletionItem item)
     {
         var text = GetText();
+        // The item's span was computed against an earlier snapshot; the user
+        // may have typed more of the word since. Replace through the caret.
+        var endUtf16 = Math.Max(item.ReplacementStart + item.ReplacementLength, GetCaretUtf16Offset());
         var startChar = CharOffsetFromUtf16(text, item.ReplacementStart);
-        var endChar = CharOffsetFromUtf16(text, item.ReplacementStart + item.ReplacementLength);
+        var endChar = CharOffsetFromUtf16(text, endUtf16);
 
         buffer.GetIterAtOffset(out var replaceStart, startChar);
         buffer.GetIterAtOffset(out var replaceEnd, endChar);
         buffer.SelectRange(replaceStart, replaceEnd);
         buffer.DeleteSelection(interactive: false, defaultEditable: true);
         buffer.InsertAtCursor(item.InsertionText, -1);
+        if (item.CaretBack > 0)
+        {
+            buffer.GetIterAtMark(out var caret, buffer.GetInsert());
+            caret.BackwardChars(item.CaretBack);
+            buffer.PlaceCursor(caret);
+        }
         view.GrabFocus();
     }
 

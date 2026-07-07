@@ -268,7 +268,7 @@ public class Workbench
         stopAction = AddAction("stop", StopRunOrDebug, "<Shift>F5", enabled: false);
         AddAction("toggle-breakpoint", () => documentManager.ActiveDocument?.ToggleBreakpointAtCaret(), "F9");
 
-        AddAction("complete", () => _ = documentManager.ActiveDocument?.ShowCompletionAsync(), "<Control>space");
+        AddAction("complete", () => documentManager.ActiveDocument?.ShowCompletion(), "<Control>space");
         AddAction("about", ShowAbout);
     }
 

@@ -46,6 +46,15 @@ static class EditorSchemeGenerator
         ("def:error", new[] { "invalid.illegal", "invalid" }),
         ("def:warning", new[] { "invalid.deprecated" }),
         ("def:link-destination", new[] { "markup.underline.link", "string" }),
+        // XML/XAML-specific styles: without these, xml.lang falls back to
+        // def:identifier for element names and def:type for attribute
+        // names, which reads nothing like VS Code's XAML coloring.
+        ("xml:element-name", new[] { "entity.name.tag" }),
+        ("xml:namespace", new[] { "entity.name.tag.namespace", "entity.name.tag" }),
+        ("xml:attribute-name", new[] { "entity.other.attribute-name" }),
+        ("xml:attribute-value", new[] { "string.quoted.double.xml", "string.quoted.double", "string" }),
+        ("xml:entity", new[] { "constant.character.entity", "constant.character", "constant.character.escape" }),
+        ("xml:comment", new[] { "comment.block", "comment" }),
     };
 
     /// <summary>Generates the style-scheme XML document for the given theme.</summary>
