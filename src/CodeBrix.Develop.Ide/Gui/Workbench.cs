@@ -40,6 +40,8 @@ public class Workbench
     readonly DocumentManager documentManager;
     readonly OutputPad buildOutput;
     readonly OutputPad applicationOutput;
+    readonly OutputPad nugetOutput;
+    readonly OutputPad ideLog;
     readonly CallStackPad callStackPad;
     readonly Gtk.Notebook bottomNotebook;
     readonly Gtk.Label statusLabel;
@@ -51,11 +53,13 @@ public class Workbench
 
     readonly BuildService buildService = new BuildService();
     readonly BuildService runService = new BuildService();
+    readonly BuildService nugetService = new BuildService();
     readonly SynchronizationContext uiContext;
     CancellationTokenSource? runCancellation;
 
     Gio.SimpleAction? buildAction, rebuildAction, cleanAction, runAction, stopAction, closeSolutionAction;
     Gio.SimpleAction? debugAction, stepOverAction, stepIntoAction, stepOutAction;
+    Gio.SimpleAction? updateCodeBrixPackagesAction;
 
     /// <summary>Creates the workbench window for the given application.</summary>
     public Workbench(Gtk.Application app)
@@ -85,16 +89,24 @@ public class Workbench
 
         buildOutput = new OutputPad();
         applicationOutput = new OutputPad();
+        nugetOutput = new OutputPad();
+        ideLog = new OutputPad(colorizeLogLevels: true);
         callStackPad = new CallStackPad();
         callStackPad.FrameActivated += (file, line) => NavigateTo(file, line);
         bottomNotebook = Gtk.Notebook.New();
-        bottomNotebook.AppendPage(buildOutput.Widget, Gtk.Label.New("Build Output"));
         bottomNotebook.AppendPage(applicationOutput.Widget, Gtk.Label.New("Application Output"));
+        bottomNotebook.AppendPage(buildOutput.Widget, Gtk.Label.New("Build Output"));
+        bottomNotebook.AppendPage(nugetOutput.Widget, Gtk.Label.New("Nuget Output"));
         bottomNotebook.AppendPage(callStackPad.Widget, Gtk.Label.New("Call Stack"));
+        bottomNotebook.AppendPage(ideLog.Widget, Gtk.Label.New("IDE Log"));
         bottomNotebook.SetVexpand(false);
 
         buildService.OutputReceived += line => uiContext.Post(_ => buildOutput.AppendLine(line), null);
         runService.OutputReceived += line => uiContext.Post(_ => applicationOutput.AppendLine(line), null);
+        nugetService.OutputReceived += line => uiContext.Post(_ => nugetOutput.AppendLine(line), null);
+        // The sink replays every line logged before the workbench existed
+        // (core runtime init, options auto-backup, ...), then follows along.
+        LoggingService.AddSink(line => uiContext.Post(_ => ideLog.AppendLine(line), null));
 
         // Debugger state changes arrive on background threads.
         DebugService.Paused += (reason, frames) => uiContext.Post(_ => OnDebugPaused(reason, frames), null);
@@ -234,6 +246,11 @@ public class Workbench
     /// <summary>Sets the status-bar text. Must be called on the UI thread.</summary>
     public void ShowStatus(string message) => statusLabel.SetText(message);
 
+    // Selects a bottom tab by its widget, so the auto-select behavior
+    // survives tab reordering.
+    void ShowBottomTab(Gtk.Widget widget) =>
+        bottomNotebook.SetCurrentPage(bottomNotebook.PageNum(widget));
+
     void InstallActions()
     {
         AddAction("new-application", ShowNewApplicationDialog, "<Control><Shift>n");
@@ -269,6 +286,7 @@ public class Workbench
         AddAction("toggle-breakpoint", () => documentManager.ActiveDocument?.ToggleBreakpointAtCaret(), "F9");
 
         AddAction("complete", () => documentManager.ActiveDocument?.ShowCompletion(), "<Control>space");
+        updateCodeBrixPackagesAction = AddAction("update-codebrix-packages", () => _ = UpdateCodeBrixPackagesAsync(), null, enabled: false);
         AddAction("about", ShowAbout);
     }
 
@@ -326,6 +344,9 @@ public class Workbench
         runMenu.Append("Toggle _Breakpoint", "app.toggle-breakpoint");
         runMenu.Append("S_top", "app.stop");
 
+        var toolsMenu = Gio.Menu.New();
+        toolsMenu.Append("_Update CodeBrix Package References", "app.update-codebrix-packages");
+
         var helpMenu = Gio.Menu.New();
         helpMenu.Append("_About CodeBrix Develop", "app.about");
 
@@ -334,6 +355,7 @@ public class Workbench
         menubar.AppendSubmenu("_Edit", editMenu);
         menubar.AppendSubmenu("_Build", buildMenu);
         menubar.AppendSubmenu("_Run", runMenu);
+        menubar.AppendSubmenu("_Tools", toolsMenu);
         menubar.AppendSubmenu("_Help", helpMenu);
         return menubar;
     }
@@ -398,10 +420,16 @@ public class Workbench
         }
 
         IdeApp.CurrentSolution = solution;
+        if (solution.IsCodeBrixPlatformApplication)
+        {
+            LoggingService.LogInfo($"Solution '{solution.Name}' is a CodeBrix.Platform application");
+            _ = CheckCodeBrixPackagesAsync(solution);
+        }
         solutionPad.LoadSolution(solution);
         window.Title = $"{solution.Name} – CodeBrix Develop";
         foreach (var action in new[] { buildAction, rebuildAction, cleanAction, runAction, debugAction, closeSolutionAction })
             action?.SetEnabled(true);
+        updateCodeBrixPackagesAction?.SetEnabled(solution.IsCodeBrixPlatformApplication);
         // The reopened-on-next-start solution; a startup-project choice left
         // over from a different solution is silently blanked by the
         // GetStartupProject validation the Solution pad just ran.
@@ -420,13 +448,317 @@ public class Workbench
         }
     }
 
+    // Silently checks nuget.org for newer versions of the CodeBrix-family
+    // packages the solution references and writes a report to the Nuget
+    // Output tab. Only when updates are found does it draw attention:
+    // status-bar notice + auto-switch to the tab.
+    async Task CheckCodeBrixPackagesAsync(Solution solution)
+    {
+        try
+        {
+            var perProject = new List<(DotNetProject Project, List<ProjectPackageReference> References)>();
+            foreach (var project in solution.Projects)
+            {
+                var references = project.PackageReferences
+                    .Where(reference => NuGetVersionService.IsCodeBrixPackageId(reference.Id))
+                    .ToList();
+                if (references.Count > 0)
+                    perProject.Add((project, references));
+            }
+            if (perProject.Count == 0)
+                return;
+
+            // One query per distinct package, all in parallel; lookups never
+            // throw — a failed query yields null.
+            var lookups = perProject
+                .SelectMany(entry => entry.References.Select(reference => reference.Id))
+                .Distinct(StringComparer.OrdinalIgnoreCase)
+                .ToDictionary(id => id, id => NuGetVersionService.GetLatestVersionAsync(id), StringComparer.OrdinalIgnoreCase);
+            await Task.WhenAll(lookups.Values);
+
+            // The user may have closed or switched solutions while we queried.
+            if (!ReferenceEquals(IdeApp.CurrentSolution, solution))
+                return;
+            RenderCodeBrixPackageReport(solution, perProject,
+                lookups.ToDictionary(pair => pair.Key, pair => pair.Value.Result, StringComparer.OrdinalIgnoreCase));
+        }
+        catch (Exception ex)
+        {
+            LoggingService.LogError("CodeBrix package version check failed", ex);
+        }
+    }
+
+    void RenderCodeBrixPackageReport(
+        Solution solution,
+        List<(DotNetProject Project, List<ProjectPackageReference> References)> perProject,
+        Dictionary<string, string> latestById)
+    {
+        nugetOutput.Clear();
+        nugetOutput.AppendLine($"CodeBrix package versions — solution '{solution.Name}', checked nuget.org {DateTime.Now:yyyy-MM-dd HH:mm}");
+        nugetOutput.AppendLine("");
+
+        var width = perProject.SelectMany(entry => entry.References).Max(reference => reference.Id.Length) + 2;
+        int total = 0, outdated = 0;
+        foreach (var (project, references) in perProject)
+        {
+            nugetOutput.AppendLine($"{project.Name}:");
+            foreach (var reference in references)
+            {
+                total++;
+                var name = ("  " + reference.Id.PadRight(width), OutputColor.Normal);
+                var latest = latestById[reference.Id];
+                if (latest == null)
+                    nugetOutput.AppendSegments(name,
+                        (reference.Version.Length > 0 ? reference.Version : "(no version)", OutputColor.Normal),
+                        ("  (nuget.org lookup failed)", OutputColor.Warning));
+                else if (reference.Version.Length == 0)
+                    nugetOutput.AppendSegments(name,
+                        ("(no version)", OutputColor.Warning),
+                        ($"  latest: {latest}", OutputColor.Good));
+                else if (NuGetVersionService.IsUpToDate(reference.Version, latest))
+                    nugetOutput.AppendSegments(name, (reference.Version, OutputColor.Good));
+                else
+                {
+                    outdated++;
+                    nugetOutput.AppendSegments(name,
+                        (reference.Version, OutputColor.Bad),
+                        ("  →  ", OutputColor.Normal),
+                        (latest, OutputColor.Good));
+                }
+            }
+        }
+        nugetOutput.AppendLine("");
+
+        if (outdated > 0)
+        {
+            nugetOutput.AppendSegments(
+                ($"{outdated} of {total} CodeBrix package reference{(total == 1 ? "" : "s")} ", OutputColor.Normal),
+                ("not on the latest version", OutputColor.Bad),
+                (".", OutputColor.Normal));
+            nugetOutput.AppendLine("Select Tools > Update CodeBrix Package References to update them.");
+            ShowBottomTab(nugetOutput.Widget);
+            ShowStatus($"CodeBrix package updates available — {outdated} reference{(outdated == 1 ? "" : "s")} out of date (see Nuget Output)");
+            LoggingService.LogInfo($"CodeBrix package check: {outdated} of {total} references out of date");
+        }
+        else
+        {
+            nugetOutput.AppendSegments(
+                ($"All {total} CodeBrix package reference{(total == 1 ? " is" : "s are")} ", OutputColor.Normal),
+                ("up to date", OutputColor.Good),
+                (".", OutputColor.Normal));
+            LoggingService.LogInfo($"CodeBrix package check: all {total} references up to date");
+        }
+    }
+
+    // The Tools > Update CodeBrix Package References command: surveys the
+    // CodeBrix-family package references, queries nuget.org for the latest
+    // versions (all-or-nothing — any failed lookup cancels the operation),
+    // rewrites the outdated versions in the .csproj files, refreshes the
+    // in-memory projects and any open (clean) .csproj editor tabs, reports
+    // to the Nuget Output tab, and runs dotnet restore.
+    async Task UpdateCodeBrixPackagesAsync()
+    {
+        if (IdeApp.CurrentSolution is not { } solution || !solution.IsCodeBrixPlatformApplication)
+            return;
+
+        // Unsaved .csproj edits would be clobbered by the rewrite — cancel
+        // before touching anything.
+        var unsaved = documentManager.Documents
+            .Where(document => document.IsModified && document.FileName.HasExtension(".csproj"))
+            .Select(document => document.FileName.FileName)
+            .ToList();
+        if (unsaved.Count > 0)
+        {
+            LoggingService.LogError(
+                $"Update CodeBrix Package References cannot continue: unsaved changes in {string.Join(", ", unsaved)}. Save the file{(unsaved.Count == 1 ? "" : "s")} and try again.");
+            ShowStatus("Update CodeBrix Package References canceled — unsaved .csproj changes (see IDE Log)");
+            ShowBottomTab(ideLog.Widget);
+            return;
+        }
+
+        var dialog = ShowBlockingProgressDialog(out var progressLabel);
+        try
+        {
+            var perProject = new List<(DotNetProject Project, List<ProjectPackageReference> References)>();
+            foreach (var project in solution.Projects)
+            {
+                var references = project.PackageReferences
+                    .Where(reference => NuGetVersionService.IsCodeBrixPackageId(reference.Id))
+                    .ToList();
+                if (references.Count > 0)
+                    perProject.Add((project, references));
+            }
+            if (perProject.Count == 0)
+                return;
+
+            var ids = perProject
+                .SelectMany(entry => entry.References.Select(reference => reference.Id))
+                .Distinct(StringComparer.OrdinalIgnoreCase)
+                .ToList();
+            progressLabel.SetText($"Checking nuget.org for {ids.Count} package{(ids.Count == 1 ? "" : "s")}…");
+            var lookups = ids.ToDictionary(id => id, id => NuGetVersionService.GetLatestVersionAsync(id), StringComparer.OrdinalIgnoreCase);
+            await Task.WhenAll(lookups.Values);
+            var latestById = lookups.ToDictionary(pair => pair.Key, pair => pair.Value.Result, StringComparer.OrdinalIgnoreCase);
+
+            // All-or-nothing: a single failed lookup cancels the operation.
+            var failed = ids.Where(id => latestById[id] == null).ToList();
+            if (failed.Count > 0)
+            {
+                var message = $"Update CodeBrix Package References canceled: nuget.org lookup failed for {string.Join(", ", failed)}";
+                LoggingService.LogError(message);
+                nugetOutput.Clear();
+                nugetOutput.AppendLine($"Update CodeBrix Package References — solution '{solution.Name}', {DateTime.Now:yyyy-MM-dd HH:mm}");
+                nugetOutput.AppendLine("");
+                nugetOutput.AppendSegments((message, OutputColor.Bad));
+                nugetOutput.AppendLine("No project files were changed.");
+                ShowBottomTab(nugetOutput.Widget);
+                ShowStatus("Update CodeBrix Package References canceled — nuget.org lookups failed");
+                return;
+            }
+
+            progressLabel.SetText("Updating project files…");
+            nugetOutput.Clear();
+            nugetOutput.AppendLine($"Update CodeBrix Package References — solution '{solution.Name}', {DateTime.Now:yyyy-MM-dd HH:mm}");
+            nugetOutput.AppendLine("");
+
+            var width = perProject.SelectMany(entry => entry.References).Max(reference => reference.Id.Length) + 2;
+            var changedFiles = new List<FilePath>();
+            var updatedCount = 0;
+            foreach (var (project, references) in perProject)
+            {
+                nugetOutput.AppendLine($"{project.Name}:");
+                var text = ReadProjectText(project.FileName, out var hadBom);
+                var fileChanged = false;
+                foreach (var reference in references)
+                {
+                    var name = ("  " + reference.Id.PadRight(width), OutputColor.Normal);
+                    var latest = latestById[reference.Id]!;
+                    if (reference.Version.Length == 0)
+                    {
+                        nugetOutput.AppendSegments(name, ("(no version — skipped)", OutputColor.Warning));
+                        continue;
+                    }
+                    if (NuGetVersionService.IsUpToDate(reference.Version, latest))
+                    {
+                        nugetOutput.AppendSegments(name, (reference.Version, OutputColor.Good), ("  already latest", OutputColor.Normal));
+                        continue;
+                    }
+                    text = PackageReferenceRewriter.UpdateVersion(text, reference.Id, latest, out var updated);
+                    if (updated)
+                    {
+                        updatedCount++;
+                        fileChanged = true;
+                        nugetOutput.AppendSegments(name,
+                            (reference.Version, OutputColor.Bad),
+                            ("  →  ", OutputColor.Normal),
+                            (latest, OutputColor.Good),
+                            ("  updated", OutputColor.Good));
+                    }
+                    else
+                        nugetOutput.AppendSegments(name,
+                            (reference.Version, OutputColor.Bad),
+                            ("  could not rewrite the version in the project file", OutputColor.Warning));
+                }
+                if (fileChanged)
+                {
+                    WriteProjectText(project.FileName, text, hadBom);
+                    changedFiles.Add(project.FileName);
+                    project.RefreshFromDisk();
+                }
+            }
+
+            // Open, clean .csproj tabs pick up the rewritten content.
+            foreach (var document in documentManager.Documents)
+            {
+                if (changedFiles.Contains(document.FileName))
+                    document.ReloadFromDisk();
+            }
+
+            nugetOutput.AppendLine("");
+            if (updatedCount > 0)
+            {
+                nugetOutput.AppendSegments(
+                    ($"Updated {updatedCount} package reference{(updatedCount == 1 ? "" : "s")} in {changedFiles.Count} project file{(changedFiles.Count == 1 ? "" : "s")}.", OutputColor.Good));
+                nugetOutput.AppendLine("");
+                progressLabel.SetText("Running dotnet restore…");
+                var restore = await nugetService.RestoreAsync(solution.FileName);
+                nugetOutput.AppendSegments(restore.Success
+                    ? ("Restore succeeded.", OutputColor.Good)
+                    : ("Restore FAILED — see output above.", OutputColor.Bad));
+                ShowStatus($"CodeBrix packages updated — {updatedCount} reference{(updatedCount == 1 ? "" : "s")} in {changedFiles.Count} file{(changedFiles.Count == 1 ? "" : "s")}"
+                    + (restore.Success ? ", restore succeeded" : ", restore FAILED"));
+                LoggingService.LogInfo($"Update CodeBrix Package References: {updatedCount} references updated in {changedFiles.Count} files; restore {(restore.Success ? "succeeded" : "failed")}");
+            }
+            else
+            {
+                nugetOutput.AppendSegments(("All CodeBrix package references are already up to date.", OutputColor.Good));
+                ShowStatus("CodeBrix packages are already up to date");
+                LoggingService.LogInfo("Update CodeBrix Package References: everything already up to date");
+            }
+            ShowBottomTab(nugetOutput.Widget);
+        }
+        catch (Exception ex)
+        {
+            LoggingService.LogError("Update CodeBrix Package References failed", ex);
+            ShowStatus("Update CodeBrix Package References failed (see IDE Log)");
+            ShowBottomTab(ideLog.Widget);
+        }
+        finally
+        {
+            dialog.Destroy();
+        }
+    }
+
+    // A modal, undecorated-close progress window that blocks the UI while
+    // the package update runs; the main loop keeps pumping through the
+    // awaits, so the spinner animates and the label updates.
+    Gtk.Window ShowBlockingProgressDialog(out Gtk.Label progressLabel)
+    {
+        var dialog = Gtk.Window.New();
+        dialog.Title = "Update CodeBrix Package References";
+        dialog.SetTransientFor(window);
+        dialog.SetModal(true);
+        dialog.SetResizable(false);
+        dialog.SetDeletable(false);
+        // Swallow close attempts (Alt+F4 etc.) while the operation runs.
+        dialog.OnCloseRequest += (_, _) => true;
+
+        var spinner = Gtk.Spinner.New();
+        spinner.SetSizeRequest(24, 24);
+        spinner.Start();
+        progressLabel = Gtk.Label.New("Surveying CodeBrix package references…");
+        progressLabel.SetXalign(0);
+        var box = Gtk.Box.New(Gtk.Orientation.Horizontal, 12);
+        box.SetMarginStart(20);
+        box.SetMarginEnd(20);
+        box.SetMarginTop(16);
+        box.SetMarginBottom(16);
+        box.Append(spinner);
+        box.Append(progressLabel);
+        dialog.SetChild(box);
+        dialog.Present();
+        return dialog;
+    }
+
+    // .csproj files often carry a UTF-8 BOM (Visual Studio convention);
+    // read and write preserving whichever way the file already is.
+    static string ReadProjectText(FilePath file, out bool hadBom)
+    {
+        var bytes = File.ReadAllBytes(file);
+        hadBom = bytes.Length >= 3 && bytes[0] == 0xEF && bytes[1] == 0xBB && bytes[2] == 0xBF;
+        return System.Text.Encoding.UTF8.GetString(bytes, hadBom ? 3 : 0, bytes.Length - (hadBom ? 3 : 0));
+    }
+
+    static void WriteProjectText(FilePath file, string text, bool hadBom)
+        => File.WriteAllText(file, text, new System.Text.UTF8Encoding(hadBom));
+
     async Task BuildAsync(bool rebuild)
     {
         if (IdeApp.CurrentSolution is not { } solution || buildService.IsBusy)
             return;
         documentManager.SaveAll();
         buildOutput.Clear();
-        bottomNotebook.SetCurrentPage(0);
+        ShowBottomTab(buildOutput.Widget);
         ShowStatus(rebuild ? "Rebuilding…" : "Building…");
 
         var result = rebuild
@@ -444,7 +776,7 @@ public class Workbench
         if (IdeApp.CurrentSolution is not { } solution || buildService.IsBusy)
             return;
         buildOutput.Clear();
-        bottomNotebook.SetCurrentPage(0);
+        ShowBottomTab(buildOutput.Widget);
         ShowStatus("Cleaning…");
         var result = await buildService.CleanAsync(solution.FileName);
         ShowStatus(result.Success ? "Clean succeeded" : "Clean failed");
@@ -493,7 +825,7 @@ public class Workbench
 
         documentManager.SaveAll();
         buildOutput.Clear();
-        bottomNotebook.SetCurrentPage(0);
+        ShowBottomTab(buildOutput.Widget);
         ShowStatus($"Building {project.Name}…");
         var result = await buildService.BuildAsync(project.FileName);
         if (!result.Success)
@@ -503,7 +835,7 @@ public class Workbench
         }
 
         applicationOutput.Clear();
-        bottomNotebook.SetCurrentPage(1);
+        ShowBottomTab(applicationOutput.Widget);
         ShowStatus($"Debugging {project.Name}…");
         try
         {
@@ -522,7 +854,7 @@ public class Workbench
         foreach (var action in new[] { stepOverAction, stepIntoAction, stepOutAction })
             action?.SetEnabled(true);
         callStackPad.ShowFrames(frames);
-        bottomNotebook.SetCurrentPage(2);
+        ShowBottomTab(callStackPad.Widget);
 
         var topFrame = frames.FirstOrDefault(frame => frame.File.Length > 0);
         if (topFrame != null)
@@ -586,7 +918,7 @@ public class Workbench
 
         documentManager.SaveAll();
         applicationOutput.Clear();
-        bottomNotebook.SetCurrentPage(1);
+        ShowBottomTab(applicationOutput.Widget);
         ShowStatus($"Running {project.Name}…");
         stopAction?.SetEnabled(true);
         runCancellation = new CancellationTokenSource();
@@ -658,7 +990,7 @@ public class Workbench
         IdeApp.CurrentSolution = null;
         solutionPad.Clear();
         foreach (var action in new[] { buildAction, rebuildAction, cleanAction, runAction, debugAction,
-                     stepOverAction, stepIntoAction, stepOutAction, closeSolutionAction })
+                     stepOverAction, stepIntoAction, stepOutAction, closeSolutionAction, updateCodeBrixPackagesAction })
             action?.SetEnabled(false);
         window.Title = "CodeBrix Develop";
         IdePreferences.LastSolution.Value = "";

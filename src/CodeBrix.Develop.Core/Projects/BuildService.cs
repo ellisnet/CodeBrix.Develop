@@ -39,6 +39,10 @@ public class BuildService
     public Task<BuildResult> RebuildAsync(FilePath target, CancellationToken cancellationToken = default)
         => RunBuildVerbAsync("build", target, cancellationToken, "--no-incremental");
 
+    /// <summary>Runs "dotnet restore" against the given solution or project file.</summary>
+    public Task<BuildResult> RestoreAsync(FilePath target, CancellationToken cancellationToken = default)
+        => RunBuildVerbAsync("restore", target, cancellationToken);
+
     async Task<BuildResult> RunBuildVerbAsync(string verb, FilePath target, CancellationToken cancellationToken, params string[] extraArguments)
     {
         var result = new BuildResult();

@@ -9,9 +9,11 @@
 
 using System;
 using System.Collections.Generic;
+using System.IO;
 using System.Linq;
 using CodeBrix.Develop.Core;
 using CodeBrix.Develop.Core.Projects;
+using Gdk = CodeBrix.Develop.UI.Gdk;
 using Gio = CodeBrix.Develop.UI.Gio;
 using GObject = CodeBrix.Develop.UI.GObject;
 using Gtk = CodeBrix.Develop.UI.Gtk;
@@ -37,6 +39,7 @@ public class SolutionPad
     // Same rule for the per-row right-click gestures: without a managed
     // reference their signal closures can be collected and never fire.
     readonly List<Gtk.GestureClick> rowGestures = new();
+    readonly Gtk.PopoverMenu solutionMenu;
 
     // The full path of the effective startup project ("" when no solution),
     // cached so every row bind does not re-run the preference validation.
@@ -74,9 +77,10 @@ public class SolutionPad
             expander.SetChild(box);
             listItem.SetChild(expander);
 
-            // Right-click on an executable project row offers "Set as
-            // Startup Project" — the node is resolved at click time because
-            // the recycled row widget is rebound as the user scrolls.
+            // Right-click on the solution root offers the Build-menu
+            // commands, and on an executable project row "Set as Startup
+            // Project" — the node is resolved at click time because the
+            // recycled row widget is rebound as the user scrolls.
             var rightClick = Gtk.GestureClick.New();
             rightClick.SetButton(3);
             // Capture phase: the ListView's own click handling must not
@@ -85,7 +89,7 @@ public class SolutionPad
             rightClick.OnPressed += (_, _) =>
             {
                 if (listItem.GetItem() is Gtk.TreeListRow row && row.GetItem() is SolutionTreeNode node)
-                    ShowProjectContextMenu(node, expander);
+                    ShowContextMenu(node, expander);
             };
             expander.AddController(rightClick);
             rowGestures.Add(rightClick);
@@ -121,6 +125,19 @@ public class SolutionPad
                 row.SetExpanded(!row.GetExpanded());
         };
 
+        // The same solution commands as the Build menu, via the same "app."
+        // actions — so their enablement (disabled while a build is running)
+        // stays in sync automatically. Parented to the ListView once and
+        // never unparented: a popover torn down in its own "closed" handler
+        // loses its action muxer before the clicked item's action resolves,
+        // and the command silently never fires.
+        var solutionMenuModel = Gio.Menu.New();
+        solutionMenuModel.Append("_Build Solution", "app.build");
+        solutionMenuModel.Append("_Rebuild Solution", "app.rebuild");
+        solutionMenuModel.Append("C_lean Solution", "app.clean");
+        solutionMenu = Gtk.PopoverMenu.NewFromModel(solutionMenuModel);
+        solutionMenu.SetParent(listView);
+
         scrolled = Gtk.ScrolledWindow.New();
         scrolled.SetChild(listView);
         scrolled.SetHexpand(true);
@@ -142,6 +159,10 @@ public class SolutionPad
     {
         rootStore.RemoveAll();
         rootStore.Append(SolutionTreeNode.Create(SolutionTreeNodeKind.Solution, $"Solution '{solution.Name}'", solution.FileName));
+        // The solution root opens expanded so its projects and solution
+        // folders are immediately visible; everything beneath stays collapsed.
+        var treeListModel = (Gtk.TreeListModel) selection.GetModel()!;
+        treeListModel.GetRow(0)?.SetExpanded(true);
         RefreshStartupProject();
     }
 
@@ -171,6 +192,28 @@ public class SolutionPad
         listView.SetFactory(factory);
     }
 
+    void ShowContextMenu(SolutionTreeNode node, Gtk.Widget anchor)
+    {
+        if (node.Kind == SolutionTreeNodeKind.Solution)
+            ShowSolutionContextMenu(anchor);
+        else
+            ShowProjectContextMenu(node, anchor);
+    }
+
+    void ShowSolutionContextMenu(Gtk.Widget anchor)
+    {
+        if (!anchor.TranslateCoordinates(listView, 0, 0, out var x, out var y))
+            x = y = 0;
+        solutionMenu.SetPointingTo(new Gdk.Rectangle
+        {
+            X = (int) x,
+            Y = (int) y,
+            Width = anchor.GetWidth(),
+            Height = anchor.GetHeight(),
+        });
+        solutionMenu.Popup();
+    }
+
     void ShowProjectContextMenu(SolutionTreeNode node, Gtk.Widget anchor)
     {
         if (node.Kind != SolutionTreeNodeKind.Project || IdeApp.CurrentSolution is not { } solution)
@@ -198,6 +241,27 @@ public class SolutionPad
 
     static string MarkupEscape(string text) =>
         text.Replace("&", "&amp;").Replace("<", "&lt;").Replace(">", "&gt;");
+
+    // The project whose folder contains the given directory — the DEEPEST
+    // base directory wins, so a project nested inside another project's
+    // folder tree owns its own files.
+    static DotNetProject? FindOwningProject(FilePath directory)
+    {
+        if (IdeApp.CurrentSolution is not { } solution)
+            return null;
+        var path = (string) directory;
+        DotNetProject? best = null;
+        foreach (var project in solution.Projects)
+        {
+            var basePath = (string) project.BaseDirectory;
+            if (!string.Equals(path, basePath, StringComparison.Ordinal)
+                && !path.StartsWith(basePath + Path.DirectorySeparatorChar, StringComparison.Ordinal))
+                continue;
+            if (best == null || basePath.Length > ((string) best.BaseDirectory).Length)
+                best = project;
+        }
+        return best;
+    }
 
     static Gio.ListModel? CreateChildModel(GObject.Object item)
     {
@@ -239,10 +303,40 @@ public class SolutionPad
                     var directory = node.Kind == SolutionTreeNodeKind.Project
                         ? node.FilePath.ParentDirectory
                         : node.FilePath;
-                    foreach (var sub in DotNetProject.GetVisibleDirectories(directory))
-                        children.Append(SolutionTreeNode.Create(SolutionTreeNodeKind.Folder, sub.FileName, sub));
-                    foreach (var file in DotNetProject.GetVisibleFiles(directory))
-                        children.Append(SolutionTreeNode.Create(SolutionTreeNodeKind.File, file.FileName, file));
+                    var owner = FindOwningProject(directory);
+                    var folders = new List<(string Name, SolutionTreeNode Node)>();
+                    var files = new List<(string Name, SolutionTreeNode Node)>();
+                    // A virtual folder (implied by linked files) has no
+                    // directory on disk; skip enumeration, not the node.
+                    if (Directory.Exists(directory))
+                    {
+                        foreach (var sub in DotNetProject.GetVisibleDirectories(directory))
+                            folders.Add((sub.FileName, SolutionTreeNode.Create(SolutionTreeNodeKind.Folder, sub.FileName, sub)));
+                        foreach (var file in DotNetProject.GetVisibleFiles(directory))
+                            files.Add((file.FileName, SolutionTreeNode.Create(SolutionTreeNodeKind.File, file.FileName, file)));
+                    }
+                    if (owner != null)
+                    {
+                        // Merge in the project's virtual folders and linked
+                        // files, shown as if they lived at their link paths.
+                        var relative = Path.GetRelativePath(owner.BaseDirectory, directory);
+                        if (relative == ".")
+                            relative = "";
+                        foreach (var name in owner.GetVirtualFolderNamesIn(relative))
+                        {
+                            var virtualPath = new FilePath(Path.Combine(directory, name));
+                            folders.Add((name, SolutionTreeNode.Create(SolutionTreeNodeKind.Folder, name, virtualPath, linked: true)));
+                        }
+                        foreach (var linked in owner.GetLinkedFilesIn(relative))
+                        {
+                            var fileName = Path.GetFileName(linked.LinkPath);
+                            files.Add((fileName, SolutionTreeNode.Create(SolutionTreeNodeKind.File, fileName, linked.RealPath, linked: true)));
+                        }
+                    }
+                    foreach (var entry in folders.OrderBy(f => f.Name, StringComparer.OrdinalIgnoreCase))
+                        children.Append(entry.Node);
+                    foreach (var entry in files.OrderBy(f => f.Name, StringComparer.OrdinalIgnoreCase))
+                        children.Append(entry.Node);
                     break;
             }
         }

@@ -123,9 +123,9 @@ public class XamlValidatorTests
 
     [Fact]
     public void Validate_skips_semantic_checks_without_xmlns_declarations()
-        => XamlValidator.Validate("<Buttton NotAThing=\"1\"/>", index).Should().BeEmpty();
+        => XamlValidator.Validate("<Buttton NotAThing=\"1\"/>", index, TestContext.Current.CancellationToken).Should().BeEmpty();
 
     [Fact]
     public void Validate_reports_xml_parse_errors()
-        => (XamlValidator.Validate("<Grid xmlns=\"x\"><Button></Grid>", index).Count > 0).Should().BeTrue();
+        => (XamlValidator.Validate("<Grid xmlns=\"x\"><Button></Grid>", index, TestContext.Current.CancellationToken).Count > 0).Should().BeTrue();
 }

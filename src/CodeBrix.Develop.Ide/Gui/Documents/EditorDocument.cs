@@ -221,7 +221,7 @@ public class EditorDocument
     public void ToggleBreakpointAtCaret()
     {
         buffer.GetIterAtMark(out var caret, buffer.GetInsert());
-        DebugService.Breakpoints.Toggle(FileName, caret.GetLine() + 1);
+        ToggleBreakpoint(caret.GetLine() + 1);
     }
 
     void OnViewPressed(double x, double y)
@@ -232,7 +232,20 @@ public class EditorDocument
             return;
         view.WindowToBufferCoords(Gtk.TextWindowType.Widget, (int) x, (int) y, out _, out var bufferY);
         view.GetLineAtY(out var iter, bufferY, out _);
-        var line = iter.GetLine() + 1; // TextIter lines are 0-based
+        ToggleBreakpoint(iter.GetLine() + 1); // TextIter lines are 0-based
+    }
+
+    void ToggleBreakpoint(int line)
+    {
+        // Removing an existing breakpoint is always allowed; setting a new
+        // one requires the line to hold breakable code — a breakpoint on a
+        // blank or comment-only line would never be hit anyway.
+        if (!DebugService.Breakpoints.IsSet(FileName, line)
+            && !TypeSystemService.IsBreakableLine(FileName, GetText(), line))
+        {
+            IdeApp.Workbench?.ShowStatus($"Line {line} has no executable code — breakpoint not set");
+            return;
+        }
         DebugService.Breakpoints.Toggle(FileName, line);
     }
 
@@ -394,11 +407,19 @@ public class EditorDocument
         hoverPopover?.Popdown();
     }
 
+    // XML-based file types GtkSourceView's stock globs don't recognize;
+    // highlighted with its xml language definition.
+    static readonly string[] xmlExtensions =
+    {
+        ".xaml", ".axaml", ".csproj", ".fsproj", ".vbproj", ".shproj",
+        ".projitems", ".props", ".targets", ".slnx", ".nuspec", ".resx", ".config",
+    };
+
     void ApplyLanguage()
     {
         var manager = GtkSource.LanguageManager.GetDefault();
         var language = manager.GuessLanguage(FileName.FileName, null);
-        if (language == null && (FileName.HasExtension(".xaml") || FileName.HasExtension(".axaml")))
+        if (language == null && Array.Exists(xmlExtensions, FileName.HasExtension))
             language = manager.GetLanguage("xml");
         if (language != null)
             buffer.SetLanguage(language);
@@ -437,6 +458,17 @@ public class EditorDocument
         if (!IsModified)
             return;
         File.WriteAllText(FileName, GetText());
+        buffer.SetModified(false);
+    }
+
+    /// <summary>
+    /// Replaces the buffer with the file's current on-disk content, e.g.
+    /// after an external tool rewrote it. Only call on unmodified documents
+    /// — any in-editor changes are discarded.
+    /// </summary>
+    public void ReloadFromDisk()
+    {
+        buffer.SetText(File.ReadAllText(FileName), -1);
         buffer.SetModified(false);
     }
 

@@ -53,8 +53,13 @@ public partial class SolutionTreeNode
     /// <summary>The file-system path as a <see cref="FilePath"/>.</summary>
     public FilePath FilePath => new FilePath(Path);
 
-    /// <summary>Creates a node for the given kind, title, and path.</summary>
-    public static SolutionTreeNode Create(SolutionTreeNodeKind kind, string title, FilePath path)
+    /// <summary>
+    /// Creates a node for the given kind, title, and path. With
+    /// <paramref name="linked"/>, the link-arrow overlay is added to the
+    /// icon — for files linked from outside the project folder and for the
+    /// virtual folders their link paths imply.
+    /// </summary>
+    public static SolutionTreeNode Create(SolutionTreeNodeKind kind, string title, FilePath path, bool linked = false)
     {
         var node = NewWithProperties(Array.Empty<GObject.ConstructArgument>());
         node.Kind = kind;
@@ -69,6 +74,8 @@ public partial class SolutionTreeNode
             SolutionTreeNodeKind.Folder => "folder-generic-16",
             _ => GetFileIconName(path),
         };
+        if (linked)
+            node.IconName += "+link-overlay-16";
         return node;
     }
 

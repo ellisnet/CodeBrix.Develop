@@ -14,7 +14,7 @@ public class XmlTreeParserTests
     {
         //Act
         var (document, diagnostics) = new XmlTreeParser(new XmlRootState())
-            .Parse(new StringReader("<a x=\"1\"><b/></a>"));
+            .Parse(new StringReader("<a x=\"1\"><b/></a>"), TestContext.Current.CancellationToken);
 
         //Assert
         document.RootElement.Should().NotBeNull();
@@ -29,7 +29,7 @@ public class XmlTreeParserTests
     {
         //Act
         var (document, diagnostics) = new XmlTreeParser(new XmlRootState())
-            .Parse(new StringReader("<a><b></a>"));
+            .Parse(new StringReader("<a><b></a>"), TestContext.Current.CancellationToken);
 
         //Assert
         document.RootElement.Should().NotBeNull();
@@ -41,7 +41,7 @@ public class XmlTreeParserTests
     {
         //Act
         var (document, _) = new XmlTreeParser(new XmlRootState())
-            .Parse(new StringReader("<Grid <Button Conte"));
+            .Parse(new StringReader("<Grid <Button Conte"), TestContext.Current.CancellationToken);
 
         //Assert
         document.Should().NotBeNull();

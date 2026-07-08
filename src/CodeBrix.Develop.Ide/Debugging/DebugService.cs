@@ -85,7 +85,7 @@ public static class DebugService
                 throw new InvalidOperationException("A debug session is already active");
         }
 
-        var program = project.GetOutputExecutable();
+        var program = await project.GetOutputExecutableAsync().ConfigureAwait(false);
         if (!File.Exists(program))
             throw new FileNotFoundException($"The built executable was not found: {program}", program);
 

@@ -56,6 +56,14 @@ public class Solution
     public DotNetProject StartupProject => projects.FirstOrDefault(p => p.IsExecutable);
 
     /// <summary>
+    /// Whether this solution is a CodeBrix.Platform application: any project
+    /// referencing the CodeBrix.Platform.ApacheLicenseForever package is a
+    /// guaranteed marker (typically the .Core project).
+    /// </summary>
+    public bool IsCodeBrixPlatformApplication =>
+        projects.Any(p => p.HasPackageReference("CodeBrix.Platform.ApacheLicenseForever"));
+
+    /// <summary>
     /// Loads a solution from a .sln, .slnx, or .csproj file (a single project
     /// is wrapped in an implicit solution).
     /// </summary>

@@ -46,6 +46,8 @@ public static class ImageService
     /// <summary>
     /// Returns the texture for a logical icon name, preferring the variant
     /// matching the current theme, or null when the icon does not exist.
+    /// A "base+overlay" name (e.g. "file-source-16+link-overlay-16")
+    /// composites the overlay icon onto the base icon.
     /// </summary>
     public static Gdk.Texture? GetIcon(string name, bool disabled = false)
     {
@@ -54,9 +56,32 @@ public static class ImageService
         if (cache.TryGetValue(key, out var cached))
             return cached;
 
-        var texture = LoadFirstExisting(Candidates(name, dark, disabled));
+        var plus = name.IndexOf('+');
+        var texture = plus >= 0
+            ? ComposeOverlay(name[..plus], name[(plus + 1)..])
+            : LoadFirstExisting(Candidates(name, dark, disabled));
         cache[key] = texture;
         return texture;
+    }
+
+    static Gdk.Texture? ComposeOverlay(string baseName, string overlayName)
+    {
+        var basePixbuf = GetPixbuf(baseName);
+        if (basePixbuf == null)
+            return null;
+        var overlayPixbuf = GetPixbuf(overlayName);
+        if (overlayPixbuf == null)
+            return Gdk.Texture.NewForPixbuf(basePixbuf);
+        // Copy first: GetPixbuf caches, and compositing draws in place. The
+        // overlay is scaled to the base canvas so 1x overlays fit @2x bases.
+        var composed = basePixbuf.Copy();
+        if (composed == null)
+            return Gdk.Texture.NewForPixbuf(basePixbuf);
+        overlayPixbuf.Composite(composed, 0, 0, composed.GetWidth(), composed.GetHeight(), 0, 0,
+            (double) composed.GetWidth() / overlayPixbuf.GetWidth(),
+            (double) composed.GetHeight() / overlayPixbuf.GetHeight(),
+            GdkPixbuf.InterpType.Bilinear, 255);
+        return Gdk.Texture.NewForPixbuf(composed);
     }
 
     static readonly Dictionary<string, GdkPixbuf.Pixbuf?> pixbufCache = new(StringComparer.Ordinal);

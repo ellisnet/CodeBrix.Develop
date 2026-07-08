@@ -10,12 +10,15 @@
 using System;
 using System.Diagnostics;
 using System.IO;
+using System.Threading.Tasks;
 using CodeBrix.Develop.Core;
 using CodeBrix.Develop.Core.Options;
 using CodeBrix.Develop.Ide;
 using CodeBrix.Develop.Ide.Themes;
 using Gio = CodeBrix.Develop.UI.Gio;
+using GLib = CodeBrix.Develop.UI.GLib;
 using Gtk = CodeBrix.Develop.UI.Gtk;
+using GtkSource = CodeBrix.Develop.UI.GtkSource;
 
 namespace CodeBrix.Develop;
 
@@ -30,6 +33,39 @@ static class Program
         // auto-backup + pruning — before any UI exists, so everything below
         // can read configuration.
         PropertyService.Initialize();
+
+        // Last-resort exception handling. Without a handler, an exception
+        // escaping a GTK signal handler terminates the process at the native
+        // boundary (the binding prints it and calls Environment.Exit). Log it
+        // to the console + IDE Log and keep the IDE alive instead.
+        GLib.UnhandledException.SetHandler(ex =>
+        {
+            try
+            {
+                LoggingService.LogError("Unhandled exception", ex);
+                IdeApp.Workbench?.ShowStatus("An internal error occurred — see the IDE Log tab for details");
+            }
+            catch
+            {
+                // never let the handler itself take the process down
+            }
+        });
+        // Fire-and-forget task faults surface at garbage collection; fatal
+        // CLR-level crashes at least leave their details in the log.
+        TaskScheduler.UnobservedTaskException += (_, e) =>
+        {
+            e.SetObserved();
+            LoggingService.LogError("Unobserved task exception", e.Exception);
+        };
+        AppDomain.CurrentDomain.UnhandledException += (_, e) =>
+            LoggingService.LogError($"Fatal unhandled exception: {e.ExceptionObject}");
+
+        // Gtk.Application only initializes the Gtk module implicitly; the
+        // GtkSource module must be initialized explicitly so its types are
+        // registered for dynamically wrapped return values — without this,
+        // Buffer.CreateSourceMark's GtkSourceMark comes back wrapped as a
+        // Gtk.TextMark and the typed cast crashes (the breakpoint-click bug).
+        GtkSource.Module.Initialize();
 
         var application = Gtk.Application.New("com.codebrix.develop", Gio.ApplicationFlags.NonUnique);
         application.OnActivate += (sender, eventArgs) =>

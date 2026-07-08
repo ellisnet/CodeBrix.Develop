@@ -1,5 +1,7 @@
 using System;
+using System.Collections.Generic;
 using System.IO;
+using System.Threading.Tasks;
 using CodeBrix.Develop.Core.Projects;
 using SilverAssertions;
 using Xunit;
@@ -42,6 +44,54 @@ public class SolutionTests : IDisposable
           </PropertyGroup>
         </Project>
         """;
+
+    [Fact]
+    public void Solution_with_the_platform_package_is_a_codebrix_platform_application()
+    {
+        //Arrange — the package id casing differs to prove the comparison is
+        //case-insensitive, as NuGet ids are.
+        WriteFile("App.Core/App.Core.csproj", """
+            <Project Sdk="Microsoft.NET.Sdk">
+              <ItemGroup>
+                <PackageReference Include="codebrix.platform.apachelicenseforever" Version="1.0.186.1273" />
+                <PackageReference Include="SkiaSharp.Skottie" Version="4.148.0" />
+              </ItemGroup>
+            </Project>
+            """);
+        var slnPath = WriteFile("App.sln", """
+            Microsoft Visual Studio Solution File, Format Version 12.00
+            Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "App.Core", "App.Core\App.Core.csproj", "{11111111-1111-1111-1111-111111111111}"
+            EndProject
+            """);
+
+        //Act
+        var solution = Solution.Load(slnPath);
+
+        //Assert
+        solution.Projects[0].PackageReferences.Count.Should().Be(2);
+        solution.Projects[0].PackageReferences[0].Id.Should().Be("codebrix.platform.apachelicenseforever");
+        solution.Projects[0].PackageReferences[0].Version.Should().Be("1.0.186.1273");
+        solution.Projects[0].HasPackageReference("CodeBrix.Platform.ApacheLicenseForever").Should().BeTrue();
+        solution.IsCodeBrixPlatformApplication.Should().BeTrue();
+    }
+
+    [Fact]
+    public void Solution_without_the_platform_package_is_not_a_codebrix_platform_application()
+    {
+        //Arrange
+        WriteFile("Lib/Lib.csproj", LibraryCsproj);
+        var slnPath = WriteFile("Plain.sln", """
+            Microsoft Visual Studio Solution File, Format Version 12.00
+            Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "Lib", "Lib\Lib.csproj", "{11111111-1111-1111-1111-111111111111}"
+            EndProject
+            """);
+
+        //Act
+        var solution = Solution.Load(slnPath);
+
+        //Assert
+        solution.IsCodeBrixPlatformApplication.Should().BeFalse();
+    }
 
     [Fact]
     public void Load_parses_classic_sln_projects()
@@ -300,6 +350,150 @@ public class DotNetProjectTests : IDisposable
         //Assert
         project.OutputType.Should().Be("Library");
         project.IsExecutable.Should().BeFalse();
+    }
+
+    [Fact]
+    public void Load_reads_linked_files_and_declared_folders()
+    {
+        //Arrange — Link both as attribute and as child element, plus a
+        //declared (possibly virtual) folder.
+        var projectDirectory = Path.Combine(tempDirectory, "App");
+        Directory.CreateDirectory(projectDirectory);
+        var csprojPath = Path.Combine(projectDirectory, "App.csproj");
+        File.WriteAllText(csprojPath, """
+            <Project Sdk="Microsoft.NET.Sdk">
+              <PropertyGroup>
+                <TargetFramework>net10.0</TargetFramework>
+              </PropertyGroup>
+              <ItemGroup>
+                <Compile Include="..\Shared\ViewModels\MainViewModel.cs" Link="ViewModels\MainViewModel.cs" />
+                <EmbeddedResource Include="..\Shared\Assets\star.svg">
+                  <Link>Assets\star.svg</Link>
+                </EmbeddedResource>
+                <Folder Include="ViewModels\" />
+              </ItemGroup>
+            </Project>
+            """);
+
+        //Act
+        var project = DotNetProject.Load(csprojPath);
+
+        //Assert
+        project.LinkedFiles.Count.Should().Be(2);
+        ((string) project.LinkedFiles[0].RealPath).Should().Be(Path.Combine(tempDirectory, "Shared", "ViewModels", "MainViewModel.cs"));
+        project.LinkedFiles[0].LinkPath.Should().Be(Path.Combine("ViewModels", "MainViewModel.cs"));
+        project.LinkedFiles[1].LinkPath.Should().Be(Path.Combine("Assets", "star.svg"));
+        project.DeclaredFolders.Count.Should().Be(1);
+        project.DeclaredFolders[0].Should().Be("ViewModels");
+    }
+
+    [Fact]
+    public void Linked_files_and_virtual_folders_resolve_per_directory()
+    {
+        //Arrange
+        var projectDirectory = Path.Combine(tempDirectory, "App");
+        Directory.CreateDirectory(projectDirectory);
+        var csprojPath = Path.Combine(projectDirectory, "App.csproj");
+        File.WriteAllText(csprojPath, """
+            <Project Sdk="Microsoft.NET.Sdk">
+              <ItemGroup>
+                <Compile Include="..\Shared\ViewModels\MainViewModel.cs" Link="ViewModels\MainViewModel.cs" />
+                <Compile Include="..\Shared\Helpers\Deep\HostHelper.cs" Link="Helpers\Deep\HostHelper.cs" />
+                <Compile Include="..\Shared\GlobalUsings.cs" Link="GlobalUsings.cs" />
+                <Folder Include="Assets\" />
+              </ItemGroup>
+            </Project>
+            """);
+        var project = DotNetProject.Load(csprojPath);
+
+        //Act
+        var rootFolders = new List<string>(project.GetVirtualFolderNamesIn(""));
+        var helpersFolders = new List<string>(project.GetVirtualFolderNamesIn("Helpers"));
+        var rootFiles = new List<LinkedProjectFile>(project.GetLinkedFilesIn(""));
+        var viewModelFiles = new List<LinkedProjectFile>(project.GetLinkedFilesIn("ViewModels"));
+
+        //Assert — nothing exists on disk, so every implied folder is virtual.
+        string.Join(",", rootFolders).Should().Be("Assets,Helpers,ViewModels");
+        string.Join(",", helpersFolders).Should().Be("Deep");
+        rootFiles.Count.Should().Be(1);
+        rootFiles[0].LinkPath.Should().Be("GlobalUsings.cs");
+        viewModelFiles.Count.Should().Be(1);
+        Path.GetFileName(viewModelFiles[0].LinkPath).Should().Be("MainViewModel.cs");
+    }
+
+    [Fact]
+    public void Virtual_folders_exclude_directories_existing_on_disk()
+    {
+        //Arrange — the ViewModels folder really exists, Assets does not.
+        var projectDirectory = Path.Combine(tempDirectory, "App");
+        Directory.CreateDirectory(Path.Combine(projectDirectory, "ViewModels"));
+        var csprojPath = Path.Combine(projectDirectory, "App.csproj");
+        File.WriteAllText(csprojPath, """
+            <Project Sdk="Microsoft.NET.Sdk">
+              <ItemGroup>
+                <Compile Include="..\Shared\MainViewModel.cs" Link="ViewModels\MainViewModel.cs" />
+                <Folder Include="Assets\" />
+              </ItemGroup>
+            </Project>
+            """);
+        var project = DotNetProject.Load(csprojPath);
+
+        //Act
+        var rootFolders = new List<string>(project.GetVirtualFolderNamesIn(""));
+
+        //Assert
+        string.Join(",", rootFolders).Should().Be("Assets");
+    }
+
+    [Fact]
+    public async Task GetOutputExecutableAsync_resolves_the_default_layout()
+    {
+        //Arrange
+        var csprojPath = Path.Combine(tempDirectory, "App.csproj");
+        File.WriteAllText(csprojPath, """
+            <Project Sdk="Microsoft.NET.Sdk">
+              <PropertyGroup>
+                <OutputType>Exe</OutputType>
+                <TargetFramework>net10.0</TargetFramework>
+              </PropertyGroup>
+            </Project>
+            """);
+        var project = DotNetProject.Load(csprojPath);
+
+        //Act — nothing is built, so the resolved path is the evaluated
+        //TargetPath (the managed assembly) rather than the apphost.
+        var executable = await project.GetOutputExecutableAsync(cancellationToken: TestContext.Current.CancellationToken);
+
+        //Assert
+        ((string) executable).Should().Contain(Path.Combine(tempDirectory, "bin", "Debug", "net10.0", "App.dll"));
+    }
+
+    [Fact]
+    public async Task GetOutputExecutableAsync_honors_customized_output_layout()
+    {
+        //Arrange — the Pinta pattern: pooled output folder, no framework
+        //segment, and a renamed assembly.
+        var projectDirectory = Path.Combine(tempDirectory, "src");
+        Directory.CreateDirectory(projectDirectory);
+        var csprojPath = Path.Combine(projectDirectory, "Painty.csproj");
+        File.WriteAllText(csprojPath, """
+            <Project Sdk="Microsoft.NET.Sdk">
+              <PropertyGroup>
+                <OutputType>WinExe</OutputType>
+                <TargetFramework>net10.0</TargetFramework>
+                <OutputPath>..\build\bin</OutputPath>
+                <AppendTargetFrameworkToOutputPath>false</AppendTargetFrameworkToOutputPath>
+                <AssemblyName>PaintyApp</AssemblyName>
+              </PropertyGroup>
+            </Project>
+            """);
+        var project = DotNetProject.Load(csprojPath);
+
+        //Act
+        var executable = await project.GetOutputExecutableAsync(cancellationToken: TestContext.Current.CancellationToken);
+
+        //Assert
+        ((string) executable).Should().Contain(Path.Combine(tempDirectory, "build", "bin", "PaintyApp.dll"));
     }
 
     [Fact]

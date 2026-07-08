@@ -10,7 +10,9 @@
 using System;
 using System.Collections.Generic;
 using System.Linq;
+using System.Threading.Tasks;
 using CodeBrix.Develop.Core;
+using GObject = CodeBrix.Develop.UI.GObject;
 using Gtk = CodeBrix.Develop.UI.Gtk;
 
 namespace CodeBrix.Develop.Ide.Gui.Documents;
@@ -89,12 +91,49 @@ public class DocumentManager
         return box;
     }
 
-    /// <summary>Closes the given document, saving it first when modified.</summary>
+    /// <summary>
+    /// Closes the given document. A modified document prompts
+    /// Save / Don't Save / Cancel first — Cancel leaves the tab open.
+    /// </summary>
     public void CloseDocument(EditorDocument document)
     {
-        // First-pass policy: never lose work — modified documents are saved
-        // on close (a save/discard prompt comes later).
-        document.Save();
+        if (!document.IsModified)
+        {
+            RemoveDocument(document);
+            return;
+        }
+        _ = PromptSaveAndCloseAsync(document);
+    }
+
+    async Task PromptSaveAndCloseAsync(EditorDocument document)
+    {
+        var alert = Gtk.AlertDialog.NewWithProperties(Array.Empty<GObject.ConstructArgument>());
+        alert.SetMessage($"Save changes to '{document.FileName.FileName}' before closing?");
+        alert.SetDetail("Your changes will be lost if you don't save them.");
+        alert.SetModal(true);
+        alert.SetButtons(new[] { "Cancel", "Don't Save", "Save" });
+        alert.SetCancelButton(0);
+        alert.SetDefaultButton(2);
+        int choice;
+        try
+        {
+            choice = await alert.ChooseAsync(document.Widget.GetRoot() as Gtk.Window);
+        }
+        catch (Exception)
+        {
+            // Dismissing the dialog (Esc, window close) surfaces as an
+            // exception from ChooseFinish; treat it as Cancel.
+            return;
+        }
+        if (choice == 0)
+            return;
+        if (choice == 2)
+            document.Save();
+        RemoveDocument(document);
+    }
+
+    void RemoveDocument(EditorDocument document)
+    {
         document.OnClosed();
         var page = notebook.PageNum(document.Widget);
         if (page >= 0)

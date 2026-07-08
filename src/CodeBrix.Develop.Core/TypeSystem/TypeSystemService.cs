@@ -16,6 +16,8 @@ using Microsoft.Build.Locator;
 using Microsoft.CodeAnalysis;
 using Microsoft.CodeAnalysis.Classification;
 using Microsoft.CodeAnalysis.Completion;
+using Microsoft.CodeAnalysis.CSharp;
+using Microsoft.CodeAnalysis.CSharp.Syntax;
 using Microsoft.CodeAnalysis.MSBuild;
 using Microsoft.CodeAnalysis.Text;
 
@@ -100,6 +102,62 @@ public static class TypeSystemService
 
     /// <summary>The current Roslyn solution snapshot, or null.</summary>
     internal static Microsoft.CodeAnalysis.Solution CurrentRoslynSolution => workspace?.CurrentSolution;
+
+    /// <summary>
+    /// Whether the given 1-based line of a C# file holds code the debugger
+    /// can bind a breakpoint to: a statement, a block brace, a member
+    /// initializer, or the header of a method-like member with a body (its
+    /// entry point). Blank lines, comment-only lines, and declaration-only
+    /// lines (usings, namespace and type headers, bodiless members) are not
+    /// breakable. Non-C# files are permissively considered breakable — the
+    /// debugger has the final say at run time. Purely syntactic: works even
+    /// while the workspace is still loading.
+    /// </summary>
+    public static bool IsBreakableLine(FilePath file, string bufferText, int line)
+    {
+        if (!file.HasExtension(".cs"))
+            return true;
+        var text = SourceText.From(bufferText);
+        if (line < 1 || line > text.Lines.Count)
+            return false;
+        var lineSpan = text.Lines[line - 1].Span;
+        var root = CSharpSyntaxTree.ParseText(text).GetRoot();
+        // DescendantTokens matches by FULL span, so a token whose leading
+        // trivia is on this line is returned too — re-check the token span.
+        foreach (var token in root.DescendantTokens(lineSpan))
+        {
+            if (token.Span.Length == 0 || !token.Span.IntersectsWith(lineSpan))
+                continue;
+            if (IsBreakableToken(token))
+                return true;
+        }
+        return false;
+    }
+
+    static bool IsBreakableToken(SyntaxToken token)
+    {
+        for (var node = token.Parent; node != null; node = node.Parent)
+        {
+            switch (node)
+            {
+                // Statements cover block braces and local functions too; the
+                // clauses cover field/property initializers, expression
+                // bodies, and this()/base() constructor initializers.
+                case StatementSyntax:
+                case ArrowExpressionClauseSyntax:
+                case EqualsValueClauseSyntax:
+                case ConstructorInitializerSyntax:
+                case AnonymousFunctionExpressionSyntax:
+                    return true;
+                // A method-like header is the member's entry breakpoint —
+                // but only when there is a body to enter.
+                case AccessorDeclarationSyntax accessor when accessor.Body != null || accessor.ExpressionBody != null:
+                case BaseMethodDeclarationSyntax method when method.Body != null || method.ExpressionBody != null:
+                    return true;
+            }
+        }
+        return false;
+    }
 
     static Document GetDocumentWithText(FilePath file, string bufferText)
     {

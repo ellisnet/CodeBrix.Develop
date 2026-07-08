@@ -159,14 +159,14 @@ public class DapClientTests : IDisposable
     public async Task Request_and_response_are_correlated_and_body_returned()
     {
         //Act — issue the request, then play the adapter answering it.
-        var requestTask = client.SendRequestAsync("threads");
+        var requestTask = client.SendRequestAsync("threads", cancellationToken: TestContext.Current.CancellationToken);
         using var request = AdapterReadRequest();
         var seq = request.RootElement.GetProperty("seq").GetInt32();
         request.RootElement.GetProperty("command").GetString().Should().Be("threads");
         AdapterSend(new { type = "response", request_seq = seq, success = true, command = "threads", body = new { value = 42 } });
 
         //Assert
-        var body = await requestTask.WaitAsync(TimeSpan.FromSeconds(10));
+        var body = await requestTask.WaitAsync(TimeSpan.FromSeconds(10), TestContext.Current.CancellationToken);
         body.GetProperty("value").GetInt32().Should().Be(42);
     }
 
@@ -174,7 +174,7 @@ public class DapClientTests : IDisposable
     public async Task Failed_responses_throw_with_the_adapter_message()
     {
         //Act
-        var requestTask = client.SendRequestAsync("evaluate");
+        var requestTask = client.SendRequestAsync("evaluate", cancellationToken: TestContext.Current.CancellationToken);
         using var request = AdapterReadRequest();
         var seq = request.RootElement.GetProperty("seq").GetInt32();
         AdapterSend(new { type = "response", request_seq = seq, success = false, command = "evaluate", message = "no can do" });
@@ -197,7 +197,7 @@ public class DapClientTests : IDisposable
         AdapterSend(new { type = "event", @event = "stopped", body = new { reason = "breakpoint", threadId = 7 } });
 
         //Assert
-        var (name, thread) = await received.Task.WaitAsync(TimeSpan.FromSeconds(10));
+        var (name, thread) = await received.Task.WaitAsync(TimeSpan.FromSeconds(10), TestContext.Current.CancellationToken);
         name.Should().Be("stopped");
         thread.Should().Be(7);
     }

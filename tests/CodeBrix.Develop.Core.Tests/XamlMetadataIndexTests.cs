@@ -113,7 +113,7 @@ public class XamlMetadataIndexTests
                     {
                         public class Grid : Microsoft.UI.Xaml.FrameworkElement { }
                     }
-                    """),
+                    """, cancellationToken: TestContext.Current.CancellationToken),
             },
             new[]
             {
