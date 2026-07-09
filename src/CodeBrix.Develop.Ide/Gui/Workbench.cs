@@ -579,6 +579,11 @@ public class Workbench
         var dialog = ShowBlockingProgressDialog(out var progressLabel);
         try
         {
+            // The Nuget Output still shows the stale open-time "packages out of
+            // date" report. Wipe it now, before we query nuget.org and restore,
+            // so only this operation's fresh results end up on the tab.
+            nugetOutput.Clear();
+
             var perProject = new List<(DotNetProject Project, List<ProjectPackageReference> References)>();
             foreach (var project in solution.Projects)
             {
@@ -606,7 +611,6 @@ public class Workbench
             {
                 var message = $"Update CodeBrix Package References canceled: nuget.org lookup failed for {string.Join(", ", failed)}";
                 LoggingService.LogError(message);
-                nugetOutput.Clear();
                 nugetOutput.AppendLine($"Update CodeBrix Package References — solution '{solution.Name}', {DateTime.Now:yyyy-MM-dd HH:mm}");
                 nugetOutput.AppendLine("");
                 nugetOutput.AppendSegments((message, OutputColor.Bad));
@@ -617,7 +621,6 @@ public class Workbench
             }
 
             progressLabel.SetText("Updating project files…");
-            nugetOutput.Clear();
             nugetOutput.AppendLine($"Update CodeBrix Package References — solution '{solution.Name}', {DateTime.Now:yyyy-MM-dd HH:mm}");
             nugetOutput.AppendLine("");
 
@@ -649,10 +652,10 @@ public class Workbench
                         updatedCount++;
                         fileChanged = true;
                         nugetOutput.AppendSegments(name,
-                            (reference.Version, OutputColor.Bad),
-                            ("  →  ", OutputColor.Normal),
                             (latest, OutputColor.Good),
-                            ("  updated", OutputColor.Good));
+                            ("  updated", OutputColor.Normal),
+                            ("  from ", OutputColor.Normal),
+                            (reference.Version, OutputColor.Warning));
                     }
                     else
                         nugetOutput.AppendSegments(name,
@@ -989,6 +992,14 @@ public class Workbench
         TypeSystemService.UnloadSolution();
         IdeApp.CurrentSolution = null;
         solutionPad.Clear();
+        // Every output tab describes the now-closed solution; blank them so the
+        // stale build/run/NuGet/call-stack text isn't mistaken for the next
+        // solution's. The IDE Log is not solution-scoped — it keeps accumulating
+        // for the life of the process, so it is deliberately left untouched.
+        buildOutput.Clear();
+        applicationOutput.Clear();
+        nugetOutput.Clear();
+        callStackPad.Clear();
         foreach (var action in new[] { buildAction, rebuildAction, cleanAction, runAction, debugAction,
                      stepOverAction, stepIntoAction, stepOutAction, closeSolutionAction, updateCodeBrixPackagesAction })
             action?.SetEnabled(false);

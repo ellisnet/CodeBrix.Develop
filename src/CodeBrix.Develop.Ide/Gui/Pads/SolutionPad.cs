@@ -162,7 +162,20 @@ public class SolutionPad
         // The solution root opens expanded so its projects and solution
         // folders are immediately visible; everything beneath stays collapsed.
         var treeListModel = (Gtk.TreeListModel) selection.GetModel()!;
-        treeListModel.GetRow(0)?.SetExpanded(true);
+        var rootRow = treeListModel.GetRow(0);
+        rootRow?.SetExpanded(true);
+        // Special case: the root's only child is a single solution folder
+        // (e.g. every project tucked under one "CodeBrixPlatform" folder).
+        // Open that folder too, so the freshly opened solution reveals its
+        // projects instead of a lone collapsed folder. Only the root is
+        // expanded at this point, so exactly one child means GetRow(1) is it
+        // and GetRow(2) is null. This is the only case where a child of the
+        // root is auto-expanded.
+        if (rootRow != null
+            && treeListModel.GetRow(1) is { } onlyChild
+            && treeListModel.GetRow(2) == null
+            && onlyChild.GetItem() is SolutionTreeNode { Kind: SolutionTreeNodeKind.SolutionFolder })
+            onlyChild.SetExpanded(true);
         RefreshStartupProject();
     }
 
