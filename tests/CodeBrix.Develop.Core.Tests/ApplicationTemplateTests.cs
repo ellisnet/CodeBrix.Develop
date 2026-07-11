@@ -74,10 +74,13 @@ public class ApplicationTemplateTests : IDisposable
         var slnxPath = ApplicationTemplate.Generate(MakeOptions());
         var solution = Solution.Load(slnxPath);
 
-        //Assert — UI + Core + 3 heads + 2 libs + 2 test projects.
+        //Assert — UI + Core + 3 heads + 2 libs + 2 test projects. The test
+        // projects are executables too (xUnit v3 self-executing binaries).
         solution.Projects.Count.Should().Be(9);
         solution.Projects.Count(p => p.IsSharedProject).Should().Be(1);
-        solution.Projects.Count(p => p.IsExecutable).Should().Be(3);
+        solution.Projects.Count(p => p.IsExecutable).Should().Be(5);
+        solution.Projects.Count(p => p.IsTestProject).Should().Be(2);
+        solution.Projects.Where(p => p.IsTestProject).All(p => p.UsesMicrosoftTestingPlatformRunner).Should().BeTrue();
         solution.StartupProject.Name.Should().Be("MyNewApp.MacOS");
 
         // Platform projects at the root; libraries and tests grouped in

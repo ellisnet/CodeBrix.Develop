@@ -602,6 +602,12 @@ public static class ApplicationTemplate
 
               <PropertyGroup>
                 <TargetFramework>net10.0</TargetFramework>
+                <!-- xUnit.net v3 test projects are self-executing binaries and
+                     must build as Exe; run via Microsoft.Testing.Platform,
+                     matching the CodeBrix family test convention. -->
+                <OutputType>Exe</OutputType>
+                <UseMicrosoftTestingPlatformRunner>true</UseMicrosoftTestingPlatformRunner>
+                <TestingPlatformDotnetTestSupport>true</TestingPlatformDotnetTestSupport>
               </PropertyGroup>
 
               <ItemGroup>

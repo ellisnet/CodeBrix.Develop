@@ -75,9 +75,12 @@ public static class DebugService
 
     /// <summary>
     /// Launches the given (already built) project under the debugger with
-    /// the current breakpoints applied.
+    /// the current breakpoints applied. Optional command-line arguments are
+    /// passed to the debuggee — a test project's executable launched with a
+    /// test filter is "debug this test" (breakpoints, stepping, and hover
+    /// evaluation inside test code all work unchanged).
     /// </summary>
-    public static async Task StartAsync(DotNetProject project)
+    public static async Task StartAsync(DotNetProject project, IReadOnlyList<string>? programArguments = null)
     {
         lock (gate)
         {
@@ -93,7 +96,8 @@ public static class DebugService
             .ToDictionary(file => (string) file, file => Breakpoints.GetLines(file));
 
         var newSession = await DebugSession.LaunchAsync(
-            DebugSession.DefaultDebuggerPath, program, project.BaseDirectory, breakpointsByFile).ConfigureAwait(false);
+            DebugSession.DefaultDebuggerPath, program, project.BaseDirectory, breakpointsByFile,
+            programArguments).ConfigureAwait(false);
 
         newSession.Stopped += (reason, threadId) => _ = OnStoppedAsync(newSession, reason);
         newSession.Resumed += () =>

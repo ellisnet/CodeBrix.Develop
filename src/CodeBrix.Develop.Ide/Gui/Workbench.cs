@@ -16,6 +16,7 @@ using System.Collections.Generic;
 using CodeBrix.Develop.Core;
 using CodeBrix.Develop.Core.Debugging;
 using CodeBrix.Develop.Core.Projects;
+using CodeBrix.Develop.Core.Testing;
 using CodeBrix.Develop.Core.TypeSystem;
 using CodeBrix.Develop.Ide.Debugging;
 using CodeBrix.Develop.Ide.Gui.Dialogs;
@@ -37,6 +38,9 @@ public class Workbench
     readonly Gtk.Application application;
     readonly Gtk.ApplicationWindow window;
     readonly SolutionPad solutionPad;
+    readonly TestsPad testsPad;
+    readonly TestResultsPad testResultsPad;
+    readonly Gtk.Notebook leftNotebook;
     readonly DocumentManager documentManager;
     readonly OutputPad buildOutput;
     readonly OutputPad applicationOutput;
@@ -56,10 +60,14 @@ public class Workbench
     readonly BuildService nugetService = new BuildService();
     readonly SynchronizationContext uiContext;
     CancellationTokenSource? runCancellation;
+    CancellationTokenSource? testRunCancellation;
+    bool testStatusRefreshQueued;
 
     Gio.SimpleAction? buildAction, rebuildAction, cleanAction, runAction, stopAction, closeSolutionAction;
     Gio.SimpleAction? debugAction, stepOverAction, stepIntoAction, stepOutAction;
     Gio.SimpleAction? updateCodeBrixPackagesAction;
+    Gio.SimpleAction? runAllTestsAction, runSelectedTestsAction, debugSelectedTestAction;
+    Gio.SimpleAction? runTestAtCaretAction, debugTestAtCaretAction, rediscoverTestsAction;
 
     /// <summary>Creates the workbench window for the given application.</summary>
     public Workbench(Gtk.Application app)
@@ -85,6 +93,11 @@ public class Workbench
                 ShowStatus($"Startup project: {startup.Name}");
         };
 
+        testsPad = new TestsPad();
+        testsPad.NavigateRequested += (file, line) => NavigateTo(file, line);
+        testsPad.RunRequested += RunTests;
+        testsPad.DebugRequested += DebugTest;
+
         documentManager = new DocumentManager();
 
         buildOutput = new OutputPad();
@@ -93,11 +106,14 @@ public class Workbench
         ideLog = new OutputPad(colorizeLogLevels: true);
         callStackPad = new CallStackPad();
         callStackPad.FrameActivated += (file, line) => NavigateTo(file, line);
+        testResultsPad = new TestResultsPad();
+        testResultsPad.NavigateRequested += (file, line) => NavigateTo(file, line);
         bottomNotebook = Gtk.Notebook.New();
         bottomNotebook.AppendPage(applicationOutput.Widget, Gtk.Label.New("Application Output"));
         bottomNotebook.AppendPage(buildOutput.Widget, Gtk.Label.New("Build Output"));
         bottomNotebook.AppendPage(nugetOutput.Widget, Gtk.Label.New("Nuget Output"));
         bottomNotebook.AppendPage(callStackPad.Widget, Gtk.Label.New("Call Stack"));
+        bottomNotebook.AppendPage(testResultsPad.Widget, Gtk.Label.New("Test Results"));
         bottomNotebook.AppendPage(ideLog.Widget, Gtk.Label.New("IDE Log"));
         bottomNotebook.SetVexpand(false);
 
@@ -114,6 +130,19 @@ public class Workbench
         DebugService.SessionEnded += exitCode => uiContext.Post(_ => OnDebugEnded(exitCode), null);
         DebugService.OutputReceived += line => uiContext.Post(_ => applicationOutput.AppendLine(line), null);
 
+        // Test-service events arrive on background threads too. The
+        // per-test tree rebinds are throttled — a fast run streams hundreds
+        // of results a second.
+        TestService.TestsChanged += () => uiContext.Post(_ => testsPad.Reload(), null);
+        TestService.RunStarted += () => uiContext.Post(_ => testsPad.RefreshStatuses(), null);
+        TestService.TestFinished += node =>
+        {
+            uiContext.Post(_ => testResultsPad.OnTestFinished(node), null);
+            QueueTestStatusRefresh();
+        };
+        TestService.RunFinished += summary => uiContext.Post(_ => OnTestRunFinished(summary), null);
+        TestService.OutputReceived += line => uiContext.Post(_ => buildOutput.AppendLine(line), null);
+
         verticalSplit = Gtk.Paned.New(Gtk.Orientation.Vertical);
         verticalSplit.SetStartChild(documentManager.Widget);
         verticalSplit.SetEndChild(bottomNotebook);
@@ -121,8 +150,13 @@ public class Workbench
         verticalSplit.SetShrinkStartChild(false);
         verticalSplit.SetPosition(IdePreferences.OutputPanePosition);
 
+        // The Solution and Tests trees share the left dock as notebook tabs.
+        leftNotebook = Gtk.Notebook.New();
+        leftNotebook.AppendPage(solutionPad.Widget, Gtk.Label.New("Solution"));
+        leftNotebook.AppendPage(testsPad.Widget, Gtk.Label.New("Tests"));
+
         horizontalSplit = Gtk.Paned.New(Gtk.Orientation.Horizontal);
-        horizontalSplit.SetStartChild(solutionPad.Widget);
+        horizontalSplit.SetStartChild(leftNotebook);
         horizontalSplit.SetEndChild(verticalSplit);
         horizontalSplit.SetResizeStartChild(false);
         horizontalSplit.SetShrinkStartChild(false);
@@ -174,10 +208,11 @@ public class Workbench
     void OnThemeChanged()
     {
         // Icon variants (~dark) follow the theme: reload the toolbar and
-        // Solution-pad icons, and restyle the open editors.
+        // pad icons, and restyle the open editors.
         foreach (var (button, iconName) in toolbarButtons)
             button.SetChild(ImageService.CreateImage(iconName));
         solutionPad.RefreshIcons();
+        testsPad.RefreshIcons();
         documentManager.RefreshStyleSchemes();
     }
 
@@ -256,8 +291,8 @@ public class Workbench
         AddAction("new-application", ShowNewApplicationDialog, "<Control><Shift>n");
         AddAction("open-solution", () => _ = OpenSolutionDialogAsync(), "<Control>o");
         closeSolutionAction = AddAction("close-solution", CloseSolution, null, enabled: false);
-        AddAction("save", () => { documentManager.SaveActive(); ShowStatus("Saved"); }, "<Control>s");
-        AddAction("save-all", () => { documentManager.SaveAll(); ShowStatus("All files saved"); }, "<Control><Shift>s");
+        AddAction("save", () => { documentManager.SaveActive(); ShowStatus("Saved"); RefreshTests(); }, "<Control>s");
+        AddAction("save-all", () => { documentManager.SaveAll(); ShowStatus("All files saved"); RefreshTests(); }, "<Control><Shift>s");
         AddAction("close-file", () =>
         {
             if (documentManager.ActiveDocument is { } document)
@@ -288,6 +323,16 @@ public class Workbench
         AddAction("complete", () => documentManager.ActiveDocument?.ShowCompletion(), "<Control>space");
         updateCodeBrixPackagesAction = AddAction("update-codebrix-packages", () => _ = UpdateCodeBrixPackagesAsync(), null, enabled: false);
         AddAction("about", ShowAbout);
+
+        // The MonoDevelop convention: Ctrl+T runs every test in the solution.
+        runAllTestsAction = AddAction("run-all-tests", () => RunTests(null), "<Control>t", enabled: false);
+        runSelectedTestsAction = AddAction("run-selected-tests", RunSelectedTests, null, enabled: false);
+        debugSelectedTestAction = AddAction("debug-selected-test", DebugSelectedTest, null, enabled: false);
+        // Not Ctrl+Alt+T — desktop environments commonly grab that for
+        // "open a terminal", so it would never reach the IDE.
+        runTestAtCaretAction = AddAction("run-test-at-caret", RunTestAtCaret, "<Control><Shift>t", enabled: false);
+        debugTestAtCaretAction = AddAction("debug-test-at-caret", DebugTestAtCaret, null, enabled: false);
+        rediscoverTestsAction = AddAction("rediscover-tests", RefreshTests, null, enabled: false);
     }
 
     Gio.SimpleAction AddAction(string name, Action handler, string? accel = null, bool enabled = true)
@@ -344,6 +389,15 @@ public class Workbench
         runMenu.Append("Toggle _Breakpoint", "app.toggle-breakpoint");
         runMenu.Append("S_top", "app.stop");
 
+        var testMenu = Gio.Menu.New();
+        testMenu.Append("Run _All Tests", "app.run-all-tests");
+        testMenu.Append("Run _Selected Tests", "app.run-selected-tests");
+        testMenu.Append("_Debug Selected Test", "app.debug-selected-test");
+        testMenu.Append("Run Test at _Caret", "app.run-test-at-caret");
+        testMenu.Append("Debug Test at Care_t", "app.debug-test-at-caret");
+        testMenu.Append("Re_discover Tests", "app.rediscover-tests");
+        testMenu.Append("S_top", "app.stop");
+
         var toolsMenu = Gio.Menu.New();
         toolsMenu.Append("_Update CodeBrix Package References", "app.update-codebrix-packages");
 
@@ -355,6 +409,7 @@ public class Workbench
         menubar.AppendSubmenu("_Edit", editMenu);
         menubar.AppendSubmenu("_Build", buildMenu);
         menubar.AppendSubmenu("_Run", runMenu);
+        menubar.AppendSubmenu("Tes_t", testMenu);
         menubar.AppendSubmenu("_Tools", toolsMenu);
         menubar.AppendSubmenu("_Help", helpMenu);
         return menubar;
@@ -430,6 +485,9 @@ public class Workbench
         foreach (var action in new[] { buildAction, rebuildAction, cleanAction, runAction, debugAction, closeSolutionAction })
             action?.SetEnabled(true);
         updateCodeBrixPackagesAction?.SetEnabled(solution.IsCodeBrixPlatformApplication);
+        // The Tests pad fills from a fast syntax scan — no build needed.
+        SetTestActionsEnabled(TestService.SolutionHasTests(solution));
+        _ = TestService.RefreshAsync(solution);
         // The reopened-on-next-start solution; a startup-project choice left
         // over from a different solution is silently blanked by the
         // GetStartupProject validation the Solution pad just ran.
@@ -772,6 +830,181 @@ public class Workbench
             $"{result.ErrorCount} error{(result.ErrorCount == 1 ? "" : "s")}, " +
             $"{result.WarningCount} warning{(result.WarningCount == 1 ? "" : "s")} " +
             $"({result.Elapsed.TotalSeconds:F1}s)");
+        RefreshTests();
+    }
+
+    // Rescans the test tree (results of unchanged tests are preserved).
+    // Cheap enough to run after every build and save.
+    void RefreshTests()
+    {
+        if (IdeApp.CurrentSolution is { } solution && TestService.SolutionHasTests(solution))
+            _ = TestService.RefreshAsync(solution);
+    }
+
+    void SetTestActionsEnabled(bool enabled)
+    {
+        foreach (var action in new[] { runAllTestsAction, runSelectedTestsAction, debugSelectedTestAction,
+                     runTestAtCaretAction, debugTestAtCaretAction, rediscoverTestsAction })
+            action?.SetEnabled(enabled);
+    }
+
+    // Coalesces the per-test tree rebinds a streaming run produces.
+    void QueueTestStatusRefresh()
+    {
+        if (testStatusRefreshQueued)
+            return;
+        testStatusRefreshQueued = true;
+        _ = Task.Run(async () =>
+        {
+            await Task.Delay(100);
+            uiContext.Post(_ =>
+            {
+                testStatusRefreshQueued = false;
+                testsPad.RefreshStatuses();
+            }, null);
+        });
+    }
+
+    /// <summary>Runs the given test nodes (null/empty runs every test in the solution).</summary>
+    public void RunTests(IReadOnlyList<TestNode>? selection) => _ = RunTestsAsync(selection);
+
+    /// <summary>Builds the node's project and debugs its tests (the D.6 args-launch path).</summary>
+    public void DebugTest(TestNode node) => _ = DebugTestAsync(node);
+
+    void RunSelectedTests()
+    {
+        var nodes = testsPad.SelectedNodes;
+        if (nodes.Count == 0)
+            ShowStatus("Select tests in the Tests pad first");
+        else
+            RunTests(nodes);
+    }
+
+    void DebugSelectedTest()
+    {
+        var nodes = testsPad.SelectedNodes;
+        if (nodes.Count == 0)
+            ShowStatus("Select a test in the Tests pad first");
+        else
+            DebugTest(nodes[0]);
+    }
+
+    void RunTestAtCaret()
+    {
+        if (ResolveTestAtCaret() is { } test)
+            RunTests(new[] { test });
+    }
+
+    void DebugTestAtCaret()
+    {
+        if (ResolveTestAtCaret() is { } test)
+            DebugTest(test);
+    }
+
+    TestNode? ResolveTestAtCaret()
+    {
+        if (documentManager.ActiveDocument is not { } document)
+        {
+            ShowStatus("No active document");
+            return null;
+        }
+        var test = TestService.FindTestAtLine(document.FileName, document.GetCaretLine());
+        if (test == null)
+            ShowStatus("No test found at the caret");
+        return test;
+    }
+
+    async Task RunTestsAsync(IReadOnlyList<TestNode>? selection)
+    {
+        if (IdeApp.CurrentSolution == null || TestService.IsRunning || buildService.IsBusy || DebugService.IsSessionActive)
+            return;
+        documentManager.SaveAll();
+
+        var targets = (selection is { Count: > 0 } ? selection : TestService.Roots)
+            .SelectMany(node => node.EnumerateMethods())
+            .Distinct()
+            .ToList();
+        if (targets.Count == 0)
+        {
+            ShowStatus("No tests found to run");
+            return;
+        }
+
+        buildOutput.Clear();
+        testResultsPad.BeginRun(targets);
+        ShowBottomTab(testResultsPad.Widget);
+        ShowStatus($"Running {targets.Count} test{(targets.Count == 1 ? "" : "s")}…");
+        SetTestActionsEnabled(false);
+        stopAction?.SetEnabled(true);
+        testRunCancellation = new CancellationTokenSource();
+        try
+        {
+            // Completion UI (results pad, status bar, action re-enable)
+            // happens in OnTestRunFinished via the RunFinished event.
+            await TestService.RunAsync(selection, testRunCancellation.Token);
+        }
+        finally
+        {
+            testRunCancellation.Dispose();
+            testRunCancellation = null;
+        }
+    }
+
+    void OnTestRunFinished(TestRunSummary summary)
+    {
+        testResultsPad.EndRun(summary);
+        testsPad.RefreshStatuses();
+        if (!DebugService.IsSessionActive)
+            stopAction?.SetEnabled(false);
+        SetTestActionsEnabled(IdeApp.CurrentSolution is { } solution && TestService.SolutionHasTests(solution));
+        if (summary.BuildFailed || summary.Error.Length > 0)
+        {
+            ShowStatus(summary.Error.Length > 0 ? summary.Error : "Test run failed");
+            if (summary.BuildFailed)
+                ShowBottomTab(buildOutput.Widget);
+        }
+        else if (summary.Cancelled)
+        {
+            ShowStatus("Test run cancelled");
+        }
+        else
+        {
+            ShowStatus($"Tests: {summary.Passed} passed, {summary.Failed} failed, {summary.Skipped} skipped " +
+                $"({summary.Elapsed.TotalSeconds:F1}s)");
+        }
+    }
+
+    async Task DebugTestAsync(TestNode node)
+    {
+        if (DebugService.IsSessionActive || buildService.IsBusy || TestService.IsRunning)
+            return;
+        documentManager.SaveAll();
+        buildOutput.Clear();
+        ShowBottomTab(buildOutput.Widget);
+        ShowStatus($"Building {node.Project.Name}…");
+        var result = await buildService.BuildAsync(node.Project.FileName);
+        if (!result.Success)
+        {
+            ShowStatus("Build failed — test debugging not started");
+            return;
+        }
+
+        applicationOutput.Clear();
+        ShowBottomTab(applicationOutput.Widget);
+        ShowStatus($"Debugging {(node.Kind == TestNodeKind.Method ? node.FullName : node.Name)}…");
+        try
+        {
+            // The test executable IS the test host (xUnit v3 runs
+            // in-process), so a normal launch with a filter argument debugs
+            // exactly this node's tests — breakpoints in test code just work.
+            await DebugService.StartAsync(node.Project, TestService.GetFilterArguments(node));
+            stopAction?.SetEnabled(true);
+        }
+        catch (Exception ex)
+        {
+            LoggingService.LogError("Starting the test debug session failed", ex);
+            ShowStatus($"Test debugging could not start: {ex.Message}");
+        }
     }
 
     async Task CleanAsync()
@@ -807,6 +1040,8 @@ public class Workbench
     {
         if (DebugService.IsSessionActive)
             _ = DebugService.StopAsync();
+        else if (TestService.IsRunning)
+            testRunCancellation?.Cancel();
         else
             runCancellation?.Cancel();
     }
@@ -992,6 +1227,8 @@ public class Workbench
         TypeSystemService.UnloadSolution();
         IdeApp.CurrentSolution = null;
         solutionPad.Clear();
+        TestService.Clear();
+        testResultsPad.Clear();
         // Every output tab describes the now-closed solution; blank them so the
         // stale build/run/NuGet/call-stack text isn't mistaken for the next
         // solution's. The IDE Log is not solution-scoped — it keeps accumulating
@@ -1003,6 +1240,7 @@ public class Workbench
         foreach (var action in new[] { buildAction, rebuildAction, cleanAction, runAction, debugAction,
                      stepOverAction, stepIntoAction, stepOutAction, closeSolutionAction, updateCodeBrixPackagesAction })
             action?.SetEnabled(false);
+        SetTestActionsEnabled(false);
         window.Title = "CodeBrix Develop";
         IdePreferences.LastSolution.Value = "";
         IdePreferences.StartupProject.Value = "";

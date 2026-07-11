@@ -85,9 +85,12 @@ public class DebugSession : IDisposable
     /// <summary>
     /// Starts the debugger, launches the program under it with the given
     /// breakpoints applied, and returns once the debuggee is running.
+    /// Optional command-line arguments are passed to the debuggee (e.g. the
+    /// test filter of a debug-this-test launch).
     /// </summary>
     public static async Task<DebugSession> LaunchAsync(string debuggerPath, string program, string workingDirectory,
-        IReadOnlyDictionary<string, IReadOnlyList<int>> breakpointsByFile, CancellationToken cancellationToken = default)
+        IReadOnlyDictionary<string, IReadOnlyList<int>> breakpointsByFile,
+        IReadOnlyList<string> programArguments = null, CancellationToken cancellationToken = default)
     {
         if (!File.Exists(debuggerPath))
             throw new FileNotFoundException("The debugger binary was not found; is the CodeBrix.Develop.Debug package present?", debuggerPath);
@@ -143,6 +146,7 @@ public class DebugSession : IDisposable
                 type = "coreclr",
                 request = "launch",
                 program,
+                args = programArguments ?? Array.Empty<string>(),
                 cwd = workingDirectory,
                 console = "internalConsole",
                 stopAtEntry = false,

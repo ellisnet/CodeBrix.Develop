@@ -52,8 +52,14 @@ public class Solution
     /// </summary>
     public IReadOnlyList<string> SolutionFolderNames => solutionFolderNames;
 
-    /// <summary>The first executable project, used as the default run target.</summary>
-    public DotNetProject StartupProject => projects.FirstOrDefault(p => p.IsExecutable);
+    /// <summary>
+    /// The first executable project, used as the default run target. Test
+    /// projects are executables too (xUnit v3 self-executing binaries) but
+    /// only become the default when nothing else is runnable.
+    /// </summary>
+    public DotNetProject StartupProject =>
+        projects.FirstOrDefault(p => p.IsExecutable && !p.IsTestProject)
+        ?? projects.FirstOrDefault(p => p.IsExecutable);
 
     /// <summary>
     /// Whether this solution is a CodeBrix.Platform application: any project

@@ -9,12 +9,15 @@
 
 using System;
 using System.IO;
+using System.Linq;
 using System.Threading.Tasks;
 using CodeBrix.Develop.Core;
 using CodeBrix.Develop.Core.Debugging;
+using CodeBrix.Develop.Core.Testing;
 using CodeBrix.Develop.Core.TypeSystem;
 using CodeBrix.Develop.Ide.Debugging;
 using CodeBrix.Develop.Ide.Gui.Completion;
+using CodeBrix.Develop.Ide.Gui.Pads;
 using Gdk = CodeBrix.Develop.UI.Gdk;
 using Gtk = CodeBrix.Develop.UI.Gtk;
 using GtkSource = CodeBrix.Develop.UI.GtkSource;
@@ -29,6 +32,13 @@ public class EditorDocument
 {
     const string BreakpointCategory = "codebrix-breakpoint";
     const string ExecutionCategory = "codebrix-execution";
+    // One mark category per test status, so each gets its own gutter icon.
+    const string TestCategoryPrefix = "codebrix-test-";
+    static readonly TestStatus[] testMarkStatuses =
+    {
+        TestStatus.NotRun, TestStatus.Running, TestStatus.Passed,
+        TestStatus.Failed, TestStatus.Skipped, TestStatus.Mixed,
+    };
 
     readonly Gtk.ScrolledWindow scrolled;
     readonly GtkSource.View view;
@@ -41,6 +51,10 @@ public class EditorDocument
     readonly Gtk.EventControllerScroll wheelScroll;
     readonly Gtk.ShortcutController completionKeys;
     readonly Action<FilePath> breakpointsChangedHandler;
+    readonly Action testsChangedHandler;
+    readonly Action<TestNode> testFinishedHandler;
+    Gtk.Popover? testPopover;
+    (TestNode Test, int Line, int AnchorY)? pendingTestPopover;
     readonly Gtk.Popover hoverPopover;
     readonly Gtk.Label hoverLabel;
     readonly Gtk.EventControllerMotion popoverMotion;
@@ -154,6 +168,16 @@ public class EditorDocument
             executionAttributes.SetBackground(executionBackground);
         view.SetMarkAttributes(ExecutionCategory, executionAttributes, 20);
 
+        // Test-status marks (one category per status), below breakpoints in
+        // priority so a breakpoint icon wins on a shared line.
+        foreach (var status in testMarkStatuses)
+        {
+            var testAttributes = GtkSource.MarkAttributes.New();
+            if (ImageService.GetPixbuf(TestTreeNode.IconNameFor(status)) is { } testPixbuf)
+                testAttributes.SetPixbuf(testPixbuf);
+            view.SetMarkAttributes(TestCategoryPrefix + status, testAttributes, 5);
+        }
+
         // Attached to the view (not the gutter widget — its internal
         // renderers swallow presses) in the capture phase; a press whose x
         // falls inside the gutter's width toggles the breakpoint.
@@ -161,6 +185,17 @@ public class EditorDocument
         gutterClick.SetButton(1);
         gutterClick.SetPropagationPhase(Gtk.PropagationPhase.Capture);
         gutterClick.OnPressed += (_, args) => OnViewPressed(args.X, args.Y);
+        // The test Run/Debug popover opens on RELEASE: a popover popped up
+        // during the press is torn down again when the release breaks into
+        // its freshly acquired grab.
+        gutterClick.OnReleased += (_, _) =>
+        {
+            if (pendingTestPopover is { } pending)
+            {
+                pendingTestPopover = null;
+                ShowTestPopover(pending.Test, pending.Line, pending.AnchorY);
+            }
+        };
         view.AddController(gutterClick);
 
         hoverMotion = Gtk.EventControllerMotion.New();
@@ -204,6 +239,19 @@ public class EditorDocument
         DebugService.Breakpoints.Changed += breakpointsChangedHandler;
         ApplyBreakpointMarks();
 
+        // Test-status gutter marks follow the test tree; the service raises
+        // its events on background threads.
+        testsChangedHandler = () => uiContext?.Post(_ => ApplyTestMarks(), null);
+        testFinishedHandler = node =>
+        {
+            if (node.SourceFile == FileName)
+                uiContext?.Post(_ => ApplyTestMarks(), null);
+        };
+        TestService.TestsChanged += testsChangedHandler;
+        TestService.TestFinished += testFinishedHandler;
+        TestService.RunStarted += testsChangedHandler;
+        ApplyTestMarks();
+
         scrolled = Gtk.ScrolledWindow.New();
         scrolled.SetChild(view);
         scrolled.SetHexpand(true);
@@ -215,7 +263,20 @@ public class EditorDocument
     }
 
     /// <summary>Detaches shared-event subscriptions; call when the document closes.</summary>
-    public void OnClosed() => DebugService.Breakpoints.Changed -= breakpointsChangedHandler;
+    public void OnClosed()
+    {
+        DebugService.Breakpoints.Changed -= breakpointsChangedHandler;
+        TestService.TestsChanged -= testsChangedHandler;
+        TestService.TestFinished -= testFinishedHandler;
+        TestService.RunStarted -= testsChangedHandler;
+    }
+
+    /// <summary>The caret's 1-based line.</summary>
+    public int GetCaretLine()
+    {
+        buffer.GetIterAtMark(out var caret, buffer.GetInsert());
+        return caret.GetLine() + 1;
+    }
 
     /// <summary>Toggles a breakpoint on the caret's line (the F9 command).</summary>
     public void ToggleBreakpointAtCaret()
@@ -226,13 +287,67 @@ public class EditorDocument
 
     void OnViewPressed(double x, double y)
     {
-        // Only presses on the gutter (line numbers + marks) toggle breakpoints.
+        // Only presses on the gutter (line numbers + marks) are handled here.
         var gutterWidth = view.GetGutter(Gtk.TextWindowType.Left).GetWidth();
         if (x < 0 || x >= gutterWidth)
             return;
         view.WindowToBufferCoords(Gtk.TextWindowType.Widget, (int) x, (int) y, out _, out var bufferY);
         view.GetLineAtY(out var iter, bufferY, out _);
-        ToggleBreakpoint(iter.GetLine() + 1); // TextIter lines are 0-based
+        var line = iter.GetLine() + 1; // TextIter lines are 0-based
+
+        // A line holding a test's gutter marker offers Run/Debug (plus the
+        // breakpoint toggle); any other gutter line toggles the breakpoint.
+        var test = TestService.GetTestsInFile(FileName).FirstOrDefault(t => t.SourceLine == line);
+        if (test != null)
+            pendingTestPopover = (test, line, (int) y);
+        else
+            ToggleBreakpoint(line);
+    }
+
+    void ShowTestPopover(TestNode test, int line, int anchorY)
+    {
+        testPopover?.Popdown();
+        var box = Gtk.Box.New(Gtk.Orientation.Vertical, 0);
+        var popover = Gtk.Popover.New();
+        popover.SetChild(box);
+        popover.SetParent(view);
+        popover.OnClosed += (_, _) => popover.Unparent();
+        AppendPopoverButton(box, popover, "Run Test", () => IdeApp.Workbench?.RunTests(new[] { test }));
+        AppendPopoverButton(box, popover, "Debug Test", () => IdeApp.Workbench?.DebugTest(test));
+        AppendPopoverButton(box, popover, "Toggle Breakpoint", () => ToggleBreakpoint(line));
+        popover.SetPointingTo(new Gdk.Rectangle { X = 0, Y = anchorY, Width = 1, Height = 1 });
+        testPopover = popover;
+        popover.Popup();
+    }
+
+    static void AppendPopoverButton(Gtk.Box box, Gtk.Popover popover, string label, Action action)
+    {
+        var button = Gtk.Button.NewWithLabel(label);
+        button.SetHasFrame(false);
+        if (button.GetChild() is Gtk.Label buttonLabel)
+            buttonLabel.SetXalign(0);
+        button.OnClicked += (_, _) =>
+        {
+            popover.Popdown();
+            action();
+        };
+        box.Append(button);
+    }
+
+    // Replaces the test-status gutter marks from the current test tree.
+    void ApplyTestMarks()
+    {
+        buffer.GetBounds(out var start, out var end);
+        foreach (var status in testMarkStatuses)
+            buffer.RemoveSourceMarks(start, end, TestCategoryPrefix + status);
+        var lineCount = buffer.GetLineCount();
+        foreach (var test in TestService.GetTestsInFile(FileName))
+        {
+            if (test.SourceLine < 1 || test.SourceLine > lineCount)
+                continue;
+            buffer.GetIterAtLine(out var iter, test.SourceLine - 1);
+            buffer.CreateSourceMark(null, TestCategoryPrefix + test.Status, iter);
+        }
     }
 
     void ToggleBreakpoint(int line)

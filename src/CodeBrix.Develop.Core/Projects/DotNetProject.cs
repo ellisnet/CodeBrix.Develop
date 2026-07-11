@@ -90,6 +90,21 @@ public class DotNetProject
     public bool HasPackageReference(string packageId)
         => PackageReferences.Any(reference => string.Equals(reference.Id, packageId, StringComparison.OrdinalIgnoreCase));
 
+    /// <summary>
+    /// Whether this is a test project the IDE can discover and run tests in:
+    /// an xUnit.net v3 project, whose xunit.v3 package makes the build output
+    /// a self-executing test binary.
+    /// </summary>
+    public bool IsTestProject => !IsSharedProject && HasPackageReference("xunit.v3");
+
+    /// <summary>
+    /// Whether the test project opts into the Microsoft.Testing.Platform
+    /// runner (&lt;UseMicrosoftTestingPlatformRunner&gt;true&lt;/&gt;, the
+    /// CodeBrix family test convention) — its executable then speaks the MTP
+    /// command line instead of the native xUnit.net runner CLI.
+    /// </summary>
+    public bool UsesMicrosoftTestingPlatformRunner { get; private set; }
+
     /// <summary>Loads a project from an SDK-style .csproj or a shared .shproj file.</summary>
     public static DotNetProject Load(FilePath fileName)
     {
@@ -116,6 +131,8 @@ public class DotNetProject
 
         var properties = (root?.Elements("PropertyGroup").Elements() ?? Enumerable.Empty<XElement>()).ToList();
         project.OutputType = GetProperty(properties, "OutputType") ?? "Library";
+        project.UsesMicrosoftTestingPlatformRunner =
+            string.Equals(GetProperty(properties, "UseMicrosoftTestingPlatformRunner"), "true", StringComparison.OrdinalIgnoreCase);
 
         var single = GetProperty(properties, "TargetFramework");
         var multiple = GetProperty(properties, "TargetFrameworks");
