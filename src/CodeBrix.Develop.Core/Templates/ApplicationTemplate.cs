@@ -2,17 +2,21 @@
 // ApplicationTemplate.cs
 //
 // Copyright (c) 2026 Jeremy Ellis and contributors
-//     (generates the canonical CodeBrix.Platform application layout
-//      documented in the CodeBrix.Platform AGENT-README)
+//     (extracts the canonical CodeBrix.Platform application layout from the
+//      TemplateApp.zip archive; see the CodeBrix.Platform AGENT-README)
 // SPDX-License-Identifier: MIT
 //
 
 using System;
 using System.Collections.Generic;
 using System.IO;
+using System.IO.Compression;
 using System.Linq;
 using System.Text;
 using System.Text.RegularExpressions;
+using System.Threading;
+using System.Threading.Tasks;
+using CodeBrix.Develop.Core.Projects;
 
 namespace CodeBrix.Develop.Core.Templates;
 
@@ -41,20 +45,23 @@ public class ApplicationTemplateOptions
     public IReadOnlyList<string> LibrarySuffixes { get; set; } = Array.Empty<string>();
 
     /// <summary>
-    /// Resolved package versions (id → version); a missing or null entry
-    /// emits that PackageReference without a Version attribute.
+    /// Resolved package versions (id → version) for the generated test
+    /// projects; a missing or null entry emits that PackageReference without a
+    /// Version attribute.
     /// </summary>
     public IReadOnlyDictionary<string, string> PackageVersions { get; set; } =
         new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
 }
 
 /// <summary>
-/// Generates a complete new CodeBrix.Platform application: the .Core class
-/// library, the .UI shared project (App.xaml + Views), one thin head
-/// project per selected platform, optional extra libraries under src/libs
-/// with their test projects under tests/libs, and the cross-platform .slnx
-/// tying it all together. Follows the canonical layout from the
-/// CodeBrix.Platform AGENT-README.
+/// Generates a complete new CodeBrix.Platform application by extracting the
+/// canonical layout from the embedded <see cref="TemplateArchive"/> and
+/// transforming it: the template name becomes the chosen application name,
+/// the shared project gets a fresh GUID, unselected platform heads are
+/// dropped, and (when chosen) the default font is switched. Optional extra
+/// libraries under src/libs with their test projects are generated alongside.
+/// Whatever the archive contains is what a new application gets — updating the
+/// archive updates the output with no change here.
 /// </summary>
 public static class ApplicationTemplate
 {
@@ -66,17 +73,6 @@ public static class ApplicationTemplate
     // Name segments that shadow top-level SDK namespaces when used as a
     // project name / root namespace (see the AGENT-README naming rule).
     static readonly string[] reservedSegments = { "Windows", "System" };
-
-    /// <summary>
-    /// The framework packages referenced by the generated .Core project
-    /// (the chosen font's package is added alongside these).
-    /// </summary>
-    public static readonly IReadOnlyList<string> CorePackageIds = new[]
-    {
-        "Microsoft.Extensions.Hosting",
-        "Microsoft.Extensions.Logging.Console",
-        "CodeBrix.Platform.ApacheLicenseForever",
-    };
 
     /// <summary>The packages referenced by each generated .Tests project.</summary>
     public static readonly IReadOnlyList<string> TestPackageIds = new[]
@@ -130,21 +126,14 @@ public static class ApplicationTemplate
     }
 
     /// <summary>
-    /// The package ids the generated projects will reference, so their
-    /// latest versions can be resolved before <see cref="Generate"/>.
+    /// The package ids whose latest versions should be resolved before
+    /// <see cref="Generate"/> so the generated test projects can pin explicit
+    /// versions — only relevant when extra libraries are requested (the
+    /// application projects themselves come versioned from the archive and are
+    /// updated afterward by <see cref="BumpApplicationPackageVersionsAsync"/>).
     /// </summary>
     public static IReadOnlyList<string> GetRequiredPackageIds(ApplicationTemplateOptions options)
-    {
-        var ids = new List<string>(CorePackageIds)
-        {
-            ApplicationFontInfo.Get(options.Font).PackageId,
-        };
-        foreach (var head in options.Heads)
-            ids.Add(PlatformHeadInfo.Get(head).PackageId);
-        if (options.LibrarySuffixes.Count > 0)
-            ids.AddRange(TestPackageIds);
-        return ids;
-    }
+        => options.LibrarySuffixes.Count > 0 ? TestPackageIds : Array.Empty<string>();
 
     /// <summary>
     /// Generates the application below &lt;Location&gt;/&lt;Name&gt;/ and
@@ -172,34 +161,145 @@ public static class ApplicationTemplate
         if (Directory.Exists(root) || File.Exists(root))
             throw new InvalidOperationException($"A folder named \"{name}\" already exists in {options.Location}.");
 
-        var heads = options.Heads.Select(PlatformHeadInfo.Get).ToList();
         var libraries = options.LibrarySuffixes.Select(suffix => $"{name}.{suffix}").ToList();
+
+        ExtractApplication(options, root, name);
+        GenerateLibraries(options, root, name, libraries);
+
+        var slnxPath = Path.Combine(root, $"{name}.slnx");
+        LoggingService.LogInfo($"New CodeBrix.Platform application generated: {slnxPath}");
+        return new FilePath(slnxPath);
+    }
+
+    // Extracts the archive into <root>, applying the name/GUID/head/font
+    // transforms. Directory entries are ignored (folders are created from the
+    // files that land in them).
+    static void ExtractApplication(ApplicationTemplateOptions options, string root, string name)
+    {
+        var selectedSuffixes = new HashSet<string>(
+            options.Heads.Select(head => PlatformHeadInfo.Get(head).ProjectSuffix), StringComparer.OrdinalIgnoreCase);
+        var allHeadSuffixes = new HashSet<string>(
+            PlatformHeadInfo.All.Select(head => head.ProjectSuffix), StringComparer.OrdinalIgnoreCase);
+
+        var newGuid = Guid.NewGuid().ToString();
+        var openSans = ApplicationFontInfo.Get(ApplicationFont.OpenSans);
         var font = ApplicationFontInfo.Get(options.Font);
+        var switchFont = options.Font != ApplicationFont.OpenSans;
 
-        // src/<Name>.Core
-        var coreDirectory = Path.Combine(root, "src", $"{name}.Core");
-        Write(coreDirectory, $"{name}.Core.csproj", CoreCsproj(name, options, font));
-        Write(Path.Combine(coreDirectory, "ViewModels"), "MainViewModel.cs", MainViewModelCs(name));
+        var token = TemplateArchive.TemplateToken;
+        var rootPrefix = token + "/";
 
-        // src/<Name>.UI (shared project)
-        var uiDirectory = Path.Combine(root, "src", $"{name}.UI");
-        var sharedGuid = Guid.NewGuid().ToString();
-        Write(uiDirectory, $"{name}.UI.projitems", UiProjitems(name, sharedGuid));
-        Write(uiDirectory, $"{name}.UI.shproj", UiShproj(name, sharedGuid));
-        Write(uiDirectory, "App.xaml", AppXaml(name, font));
-        Write(uiDirectory, "App.xaml.cs", AppXamlCs(name, font));
-        Write(Path.Combine(uiDirectory, "Views"), "MainPage.xaml", MainPageXaml(name, font));
-        Write(Path.Combine(uiDirectory, "Views"), "MainPage.xaml.cs", MainPageXamlCs(name));
-
-        // src/<Name>.<Head> per selected platform
-        foreach (var head in heads)
+        var archiveBytes = TemplateArchive.GetActiveArchiveBytes();
+        using var archive = new ZipArchive(new MemoryStream(archiveBytes), ZipArchiveMode.Read);
+        foreach (var entry in archive.Entries)
         {
-            var headDirectory = Path.Combine(root, "src", $"{name}.{head.ProjectSuffix}");
-            Write(headDirectory, $"{name}.{head.ProjectSuffix}.csproj", HeadCsproj(name, head, options));
-            Write(headDirectory, "Program.cs", HeadProgramCs(name, head));
-        }
+            var full = entry.FullName.Replace('\\', '/');
+            if (full.EndsWith("/", StringComparison.Ordinal))
+                continue; // directory entry
 
-        // src/libs/<Name>.<Suffix> + tests/libs/<Name>.<Suffix>.Tests
+            var relative = full.StartsWith(rootPrefix, StringComparison.Ordinal)
+                ? full.Substring(rootPrefix.Length)
+                : full;
+            if (relative.Length == 0)
+                continue;
+
+            if (IsUnderUnselectedHead(relative, token, selectedSuffixes, allHeadSuffixes))
+                continue;
+
+            var outRelative = relative.Replace(token, name);
+            var outPath = Path.Combine(root, outRelative.Replace('/', Path.DirectorySeparatorChar));
+
+            byte[] bytes;
+            using (var entryStream = entry.Open())
+            using (var memory = new MemoryStream())
+            {
+                entryStream.CopyTo(memory);
+                bytes = memory.ToArray();
+            }
+
+            // Latin1 round-trips every byte 1:1 (including any BOM and any
+            // multi-byte UTF-8 sequence), and every token we replace is ASCII,
+            // so the transformed file is byte-identical except where changed.
+            var text = Encoding.Latin1.GetString(bytes);
+            text = text.Replace(token, name);
+            if (switchFont)
+            {
+                text = text
+                    .Replace(openSans.PackageId, font.PackageId)
+                    .Replace(openSans.FontFamilyValue, font.FontFamilyValue)
+                    .Replace(openSans.ResourceKey, font.ResourceKey)
+                    .Replace(openSans.DisplayName, font.DisplayName);
+            }
+            if (IsSharedProjectFile(outRelative))
+                text = ReplaceSharedProjectGuid(text, newGuid);
+            if (IsSolutionFile(outRelative))
+                text = PruneUnselectedHeadProjects(text, name, selectedSuffixes, allHeadSuffixes);
+
+            Directory.CreateDirectory(Path.GetDirectoryName(outPath));
+            File.WriteAllBytes(outPath, Encoding.Latin1.GetBytes(text));
+        }
+    }
+
+    // True for an archive entry under an unselected head project, e.g.
+    // "src/TemplateApp.LinuxWayland/…" when Wayland is unchecked. The
+    // always-generated .Core and .UI segments are never head suffixes.
+    static bool IsUnderUnselectedHead(string relative, string token,
+        HashSet<string> selectedSuffixes, HashSet<string> allHeadSuffixes)
+    {
+        var prefix = "src/" + token + ".";
+        if (!relative.StartsWith(prefix, StringComparison.Ordinal))
+            return false;
+        var rest = relative.Substring(prefix.Length);
+        var slash = rest.IndexOf('/');
+        var segment = slash < 0 ? rest : rest.Substring(0, slash);
+        return allHeadSuffixes.Contains(segment) && !selectedSuffixes.Contains(segment);
+    }
+
+    static bool IsSharedProjectFile(string relative) =>
+        relative.EndsWith(".projitems", StringComparison.OrdinalIgnoreCase)
+        || relative.EndsWith(".shproj", StringComparison.OrdinalIgnoreCase);
+
+    static bool IsSolutionFile(string relative) =>
+        relative.EndsWith(".slnx", StringComparison.OrdinalIgnoreCase);
+
+    // Replaces the shared project's baked GUID (in <SharedGUID> in .projitems
+    // and <ProjectGuid> in .shproj) with a freshly generated one, so every
+    // generated application owns a unique — and internally matching — GUID.
+    static string ReplaceSharedProjectGuid(string text, string newGuid)
+    {
+        text = Regex.Replace(text, @"(<SharedGUID>)[^<]*(</SharedGUID>)", "${1}" + newGuid + "${2}");
+        text = Regex.Replace(text, @"(<ProjectGuid>)[^<]*(</ProjectGuid>)", "${1}" + newGuid + "${2}");
+        return text;
+    }
+
+    // Drops the <Project> lines for unselected heads from the .slnx (the
+    // application-name substitution has already run, so paths read
+    // "src/<Name>.<Suffix>/…"). Line endings are preserved.
+    static string PruneUnselectedHeadProjects(string text, string name,
+        HashSet<string> selectedSuffixes, HashSet<string> allHeadSuffixes)
+    {
+        var lines = text.Split('\n');
+        var kept = new List<string>(lines.Length);
+        foreach (var line in lines)
+        {
+            var dropped = allHeadSuffixes.Any(suffix =>
+                !selectedSuffixes.Contains(suffix)
+                && line.Contains($"src/{name}.{suffix}/", StringComparison.Ordinal));
+            if (!dropped)
+                kept.Add(line);
+        }
+        return string.Join('\n', kept);
+    }
+
+    // Generates the optional extra libraries and their test projects, then
+    // wires them into .Core (a ProjectReference each) and the .slnx (the
+    // Libraries and Tests solution folders).
+    static void GenerateLibraries(ApplicationTemplateOptions options, string root, string name,
+        IReadOnlyList<string> libraries)
+    {
+        if (libraries.Count == 0)
+            return;
+
         foreach (var library in libraries)
         {
             var libraryDirectory = Path.Combine(root, "src", "libs", library);
@@ -211,16 +311,128 @@ public static class ApplicationTemplate
             Write(testsDirectory, "BasicTests.cs", BasicTestsCs(library));
         }
 
+        InjectLibraryReferencesIntoCore(root, name, libraries);
+        InjectLibraryFoldersIntoSolution(root, name, libraries);
+    }
+
+    static void InjectLibraryReferencesIntoCore(string root, string name, IReadOnlyList<string> libraries)
+    {
+        var corePath = Path.Combine(root, "src", $"{name}.Core", $"{name}.Core.csproj");
+        var text = File.ReadAllText(corePath);
+        var builder = new StringBuilder();
+        builder.Append("\n  <ItemGroup>\n");
+        foreach (var library in libraries)
+            builder.Append($"    <ProjectReference Include=\"..\\libs\\{library}\\{library}.csproj\" />\n");
+        builder.Append("  </ItemGroup>\n");
+        File.WriteAllText(corePath, InsertBefore(text, "</Project>", builder.ToString()));
+    }
+
+    static void InjectLibraryFoldersIntoSolution(string root, string name, IReadOnlyList<string> libraries)
+    {
         var slnxPath = Path.Combine(root, $"{name}.slnx");
-        File.WriteAllText(slnxPath, Slnx(name, heads, libraries));
-        LoggingService.LogInfo($"New CodeBrix.Platform application generated: {slnxPath}");
-        return new FilePath(slnxPath);
+        var text = File.ReadAllText(slnxPath);
+        var builder = new StringBuilder();
+        builder.Append("  <Folder Name=\"/Libraries/\">\n");
+        foreach (var library in libraries)
+            builder.Append($"    <Project Path=\"src/libs/{library}/{library}.csproj\" />\n");
+        builder.Append("  </Folder>\n");
+        builder.Append("  <Folder Name=\"/Tests/\">\n");
+        foreach (var library in libraries)
+            builder.Append($"    <Project Path=\"tests/libs/{library}.Tests/{library}.Tests.csproj\" />\n");
+        builder.Append("  </Folder>\n");
+        File.WriteAllText(slnxPath, InsertBefore(text, "</Solution>", builder.ToString()));
+    }
+
+    static string InsertBefore(string text, string marker, string insertion)
+    {
+        var index = text.LastIndexOf(marker, StringComparison.Ordinal);
+        return index < 0 ? text + insertion : text.Insert(index, insertion);
     }
 
     static void Write(string directory, string fileName, string content)
     {
         Directory.CreateDirectory(directory);
         File.WriteAllText(Path.Combine(directory, fileName), content);
+    }
+
+    // Package ids kept at the archive's baked version (never bumped): the
+    // CodeBrix.Platform runtime that must move as one matched set — the core
+    // package and every platform-head runtime. Everything else (the font
+    // package, Microsoft.Extensions.*, …) is bumped to its latest release.
+    static bool IsRuntimeLockstepPackage(string packageId) =>
+        packageId.Equals("CodeBrix.Platform.ApacheLicenseForever", StringComparison.OrdinalIgnoreCase)
+        || packageId.StartsWith("CodeBrix.Platform.Runtime.", StringComparison.OrdinalIgnoreCase);
+
+    static readonly Regex packageReferenceIdPattern = new Regex(
+        @"<PackageReference\b[^>]*\bInclude\s*=\s*""([^""]+)""",
+        RegexOptions.IgnoreCase | RegexOptions.Compiled);
+
+    /// <summary>
+    /// Bumps the generated application's bumpable NuGet references to their
+    /// latest published versions — the .Core and platform-head projects only
+    /// (the library test projects were already generated at resolved
+    /// versions). The CodeBrix.Platform runtime lockstep is left at the
+    /// archive's baked version; a package whose latest version cannot be
+    /// resolved (offline) keeps its baked version. Best-effort: never throws.
+    /// </summary>
+    public static async Task BumpApplicationPackageVersionsAsync(
+        string applicationRoot, CancellationToken cancellationToken = default)
+    {
+        try
+        {
+            var sourceRoot = Path.Combine(applicationRoot, "src");
+            if (!Directory.Exists(sourceRoot))
+                return;
+
+            var librariesRoot = Path.Combine(sourceRoot, "libs") + Path.DirectorySeparatorChar;
+            var projectPaths = Directory.EnumerateFiles(sourceRoot, "*.csproj", SearchOption.AllDirectories)
+                .Where(path => !path.StartsWith(librariesRoot, StringComparison.Ordinal))
+                .ToList();
+            if (projectPaths.Count == 0)
+                return;
+
+            var texts = new Dictionary<string, string>(StringComparer.Ordinal);
+            var bumpableIds = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+            foreach (var path in projectPaths)
+            {
+                var text = File.ReadAllText(path);
+                texts[path] = text;
+                foreach (Match match in packageReferenceIdPattern.Matches(text))
+                {
+                    var id = match.Groups[1].Value;
+                    if (!IsRuntimeLockstepPackage(id))
+                        bumpableIds.Add(id);
+                }
+            }
+            if (bumpableIds.Count == 0)
+                return;
+
+            var resolver = new PackageVersionResolver();
+            var versions = await resolver.ResolveLatestVersionsAsync(bumpableIds, cancellationToken).ConfigureAwait(false);
+
+            foreach (var path in projectPaths)
+            {
+                var text = texts[path];
+                var changed = false;
+                foreach (var pair in versions)
+                {
+                    if (pair.Value == null)
+                        continue;
+                    text = PackageReferenceRewriter.UpdateVersion(text, pair.Key, pair.Value, out var updated);
+                    changed |= updated;
+                }
+                if (changed)
+                    File.WriteAllText(path, text);
+            }
+        }
+        catch (OperationCanceledException)
+        {
+            throw;
+        }
+        catch (Exception ex)
+        {
+            LoggingService.LogWarning($"Package version bump skipped: {ex.Message}");
+        }
     }
 
     // <PackageReference Include="..." Version="..." /> — or unversioned when
@@ -231,333 +443,6 @@ public static class ApplicationTemplate
         return version == null
             ? $"{indent}<PackageReference Include=\"{packageId}\" />"
             : $"{indent}<PackageReference Include=\"{packageId}\" Version=\"{version}\" />";
-    }
-
-    static string CoreCsproj(string name, ApplicationTemplateOptions options, ApplicationFontInfo font)
-    {
-        var packages = string.Join('\n', CorePackageIds.Concat(new[] { font.PackageId })
-            .Select(id => PackageReference(id, options, "    ")));
-        var builder = new StringBuilder();
-        builder.Append($$"""
-            <Project Sdk="Microsoft.NET.Sdk">
-              <PropertyGroup>
-                <TargetFramework>net10.0</TargetFramework>
-
-                <!-- Match the namespace used by the app code -->
-                <RootNamespace>{{name}}</RootNamespace>
-
-                <!-- CodeBrix.Platform needs these for internal conditional compilation -->
-                <DefineConstants>$(DefineConstants);HAS_CODEBRIX;HAS_CODEBRIX_WINUI</DefineConstants>
-              </PropertyGroup>
-
-              <ItemGroup>
-            {{packages}}
-              </ItemGroup>
-
-            """);
-        if (options.LibrarySuffixes.Count > 0)
-        {
-            builder.Append("\n  <ItemGroup>\n");
-            foreach (var suffix in options.LibrarySuffixes)
-                builder.Append($"    <ProjectReference Include=\"..\\libs\\{name}.{suffix}\\{name}.{suffix}.csproj\" />\n");
-            builder.Append("  </ItemGroup>\n");
-        }
-        builder.Append("</Project>\n");
-        return builder.ToString();
-    }
-
-    static string MainViewModelCs(string name) => $$"""
-        namespace {{name}}.ViewModels;
-
-        public class MainViewModel
-        {
-            public string Greeting => "Hello from {{name}}!";
-        }
-
-        """;
-
-    static string UiProjitems(string name, string sharedGuid) => $$"""
-        <?xml version="1.0" encoding="utf-8"?>
-        <Project xmlns="http://schemas.microsoft.com/developer/msbuild/2003">
-          <PropertyGroup>
-            <MSBuildAllProjects Condition="'$(MSBuildVersion)' == '' Or '$(MSBuildVersion)' &lt; '16.0'">$(MSBuildAllProjects);$(MSBuildThisFileFullPath)</MSBuildAllProjects>
-            <HasSharedItems>true</HasSharedItems>
-            <SharedGUID>{{sharedGuid}}</SharedGUID>
-          </PropertyGroup>
-          <PropertyGroup Label="Configuration">
-            <Import_RootNamespace>{{name}}.UI</Import_RootNamespace>
-          </PropertyGroup>
-          <ItemGroup>
-            <Page Include="$(MSBuildThisFileDirectory)App.xaml">
-              <SubType>Designer</SubType>
-              <Generator>MSBuild:Compile</Generator>
-            </Page>
-            <Page Include="$(MSBuildThisFileDirectory)Views\MainPage.xaml">
-              <SubType>Designer</SubType>
-              <Generator>MSBuild:Compile</Generator>
-            </Page>
-          </ItemGroup>
-          <ItemGroup>
-            <Compile Include="$(MSBuildThisFileDirectory)App.xaml.cs">
-              <DependentUpon>App.xaml</DependentUpon>
-            </Compile>
-            <Compile Include="$(MSBuildThisFileDirectory)Views\MainPage.xaml.cs">
-              <DependentUpon>MainPage.xaml</DependentUpon>
-            </Compile>
-          </ItemGroup>
-        </Project>
-
-        """;
-
-    static string UiShproj(string name, string sharedGuid) => $$"""
-        <?xml version="1.0" encoding="utf-8"?>
-        <Project ToolsVersion="15.0" xmlns="http://schemas.microsoft.com/developer/msbuild/2003">
-          <PropertyGroup Label="Globals">
-            <ProjectGuid>{{sharedGuid}}</ProjectGuid>
-            <MinimumVisualStudioVersion>14.0</MinimumVisualStudioVersion>
-          </PropertyGroup>
-          <Import Project="$(MSBuildExtensionsPath)\$(MSBuildToolsVersion)\Microsoft.Common.props" Condition="Exists('$(MSBuildExtensionsPath)\$(MSBuildToolsVersion)\Microsoft.Common.props')" />
-          <Import Project="$(MSBuildExtensionsPath32)\Microsoft\VisualStudio\v$(VisualStudioVersion)\CodeSharing\Microsoft.CodeSharing.Common.Default.props" />
-          <Import Project="$(MSBuildExtensionsPath32)\Microsoft\VisualStudio\v$(VisualStudioVersion)\CodeSharing\Microsoft.CodeSharing.Common.props" />
-          <PropertyGroup />
-          <Import Project="{{name}}.UI.projitems" Label="Shared" />
-          <Import Project="$(MSBuildExtensionsPath32)\Microsoft\VisualStudio\v$(VisualStudioVersion)\CodeSharing\Microsoft.CodeSharing.CSharp.targets" />
-        </Project>
-
-        """;
-
-    static string AppXaml(string name, ApplicationFontInfo font) => $$"""
-        <Application x:Class="{{name}}.App"
-               xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
-               xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml">
-
-          <Application.Resources>
-            <ResourceDictionary>
-              <ResourceDictionary.MergedDictionaries>
-                <!-- Load WinUI resources -->
-                <XamlControlsResources xmlns="using:Microsoft.UI.Xaml.Controls" />
-              </ResourceDictionary.MergedDictionaries>
-              <!-- {{font.DisplayName}} font - reference the .ttf file directly (the Fonts.xaml
-                   merge does not work on Skia targets) -->
-              <FontFamily x:Key="{{font.ResourceKey}}">{{font.FontFamilyValue}}</FontFamily>
-            </ResourceDictionary>
-          </Application.Resources>
-
-        </Application>
-
-        """;
-
-    static string AppXamlCs(string name, ApplicationFontInfo font) => $$"""
-        using Microsoft.Extensions.Logging;
-        using Microsoft.UI.Xaml;
-        using Microsoft.UI.Xaml.Controls;
-        using Microsoft.UI.Xaml.Navigation;
-        using System;
-
-        namespace {{name}};
-
-        public partial class App : Application
-        {
-            public App()
-            {
-                //Set {{font.DisplayName}} as the default font for all text in the application
-                global::CodeBrix.Platform.UI.FeatureConfiguration.Font.DefaultTextFontFamily =
-                    "{{font.FontFamilyValue}}";
-
-                InitializeComponent();
-            }
-
-            protected Window MainWindow { get; private set; }
-
-            protected override void OnLaunched(LaunchActivatedEventArgs args)
-            {
-                MainWindow = new Window
-                {
-                    Title = "{{name}}"
-                };
-
-                if (MainWindow.Content is not Frame rootFrame)
-                {
-                    rootFrame = new Frame();
-                    MainWindow.Content = rootFrame;
-                    rootFrame.NavigationFailed += OnNavigationFailed;
-                }
-
-                if (rootFrame.Content == null)
-                {
-                    rootFrame.Navigate(typeof(Views.MainPage), args.Arguments);
-                }
-
-                MainWindow.Activate();
-            }
-
-            void OnNavigationFailed(object sender, NavigationFailedEventArgs e)
-            {
-                throw new InvalidOperationException($"Failed to load {e.SourcePageType.FullName}: {e.Exception}");
-            }
-
-            // Called from each head's Program.Main BEFORE building the host.
-            public static void InitializeLogging()
-            {
-        #if DEBUG
-                var factory = LoggerFactory.Create(builder =>
-                {
-                    builder.AddConsole();
-                    builder.SetMinimumLevel(LogLevel.Information);
-                    builder.AddFilter("CodeBrix.Platform", LogLevel.Warning);
-                    builder.AddFilter("Windows", LogLevel.Warning);
-                    builder.AddFilter("Microsoft", LogLevel.Warning);
-                });
-
-                global::CodeBrix.Platform.Extensions.LogExtensionPoint.AmbientLoggerFactory = factory;
-
-        #if HAS_CODEBRIX
-                global::CodeBrix.Platform.UI.Adapter.Microsoft.Extensions.Logging.LoggingAdapter.Initialize();
-        #endif
-        #endif
-            }
-        }
-
-        """;
-
-    static string MainPageXaml(string name, ApplicationFontInfo font) => $$"""
-        <Page
-            x:Class="{{name}}.Views.MainPage"
-            xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
-            xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
-            xmlns:vm="using:{{name}}.ViewModels"
-            FontFamily="{StaticResource {{font.ResourceKey}}}"
-            Background="{ThemeResource ApplicationPageBackgroundThemeBrush}">
-
-            <Page.DataContext>
-                <vm:MainViewModel />
-            </Page.DataContext>
-
-            <Grid>
-                <TextBlock Text="{Binding Greeting}"
-                           FontSize="24"
-                           HorizontalAlignment="Center"
-                           VerticalAlignment="Center" />
-            </Grid>
-        </Page>
-
-        """;
-
-    static string MainPageXamlCs(string name) => $$"""
-        using Microsoft.UI.Xaml.Controls;
-
-        namespace {{name}}.Views;
-
-        public sealed partial class MainPage : Page
-        {
-            public MainPage()
-            {
-                this.InitializeComponent();
-            }
-        }
-
-        """;
-
-    static string HeadCsproj(string name, PlatformHeadInfo head, ApplicationTemplateOptions options)
-    {
-        var packageLine = PackageReference(head.PackageId, options, "    ");
-        // EnableWindowsTargeting lets the net10.0-windows WPF head compile
-        // inside the cross-platform solution on Linux and macOS build hosts.
-        var windowsTargeting = head.IsWpf ? "\n    <EnableWindowsTargeting>true</EnableWindowsTargeting>" : "";
-        // No <RootNamespace> on heads: sharing .Core's root namespace would
-        // make the XAML source generator emit a GlobalStaticResources type
-        // that collides with .Core's copy (CS0436 on every head).
-        return $$"""
-            <Project Sdk="Microsoft.NET.Sdk">
-              <PropertyGroup>
-                <TargetFramework>{{head.TargetFramework}}</TargetFramework>
-                <OutputType>Exe</OutputType>{{windowsTargeting}}
-
-                <!-- CodeBrix.Platform needs these for internal conditional compilation -->
-                <DefineConstants>$(DefineConstants);HAS_CODEBRIX;HAS_CODEBRIX_WINUI</DefineConstants>
-              </PropertyGroup>
-
-              <!-- Tell MSBuild to treat .xaml files as CodeBrix.Platform XAML pages -->
-              <ItemGroup>
-                <Page Include="**\*.xaml" Exclude="bin\**\*.xaml;obj\**\*.xaml" />
-                <None Remove="**\*.xaml" />
-              </ItemGroup>
-
-              <!-- Shared UI files (App.xaml + Views) -->
-              <Import Project="..\{{name}}.UI\{{name}}.UI.projitems" Label="Shared" />
-              <ItemGroup>
-                <ProjectReference Include="..\{{name}}.Core\{{name}}.Core.csproj" />
-              </ItemGroup>
-
-              <!-- EXACTLY ONE platform head package; all other packages come from {{name}}.Core -->
-              <ItemGroup>
-            {{packageLine}}
-              </ItemGroup>
-            </Project>
-
-            """;
-    }
-
-    static string HeadProgramCs(string name, PlatformHeadInfo head)
-    {
-        if (head.IsWpf)
-        {
-            // The WPF host's default OpenGL renderer conflicts with WPF's own
-            // DirectX composition ("airspace") — force software rendering.
-            return $$"""
-                using CodeBrix.Platform.UI.Hosting;
-                using CodeBrix.Platform.UI.Runtime.Skia.Wpf;
-                using System;
-
-                namespace {{name}};
-
-                internal class Program
-                {
-                    [STAThread]
-                    public static void Main(string[] args)
-                    {
-                        App.InitializeLogging();
-
-                        var host = CodeBrixPlatformHostBuilder.Create()
-                            .App(() => new App())
-                            .{{head.BootstrapCall}}()
-                            .Build();
-
-                        if (host is WpfHost wpfHost)
-                        {
-                            wpfHost.RenderSurfaceType = RenderSurfaceType.Software;
-                        }
-
-                        host.Run();
-                    }
-                }
-
-                """;
-        }
-
-        return $$"""
-            using CodeBrix.Platform.UI.Hosting;
-            using System;
-
-            namespace {{name}};
-
-            internal class Program
-            {
-                [STAThread]
-                public static void Main(string[] args)
-                {
-                    App.InitializeLogging();
-
-                    var host = CodeBrixPlatformHostBuilder.Create()
-                        .App(() => new App())
-                        .{{head.BootstrapCall}}()
-                        .Build();
-
-                    host.Run();
-                }
-            }
-
-            """;
     }
 
     static string LibraryCsproj() => """
@@ -643,30 +528,4 @@ public static class ApplicationTemplate
         }
 
         """;
-
-    static string Slnx(string name, IReadOnlyList<PlatformHeadInfo> heads, IReadOnlyList<string> libraries)
-    {
-        var builder = new StringBuilder();
-        builder.Append("<Solution>\n");
-        builder.Append($"  <!-- {name}.slnx\n");
-        builder.Append("       Generated by CodeBrix Develop: a CodeBrix.Platform application with\n");
-        builder.Append("       everything that builds with the plain .NET SDK on Linux, macOS and Windows. -->\n");
-        builder.Append($"  <Project Path=\"src/{name}.UI/{name}.UI.shproj\" />\n");
-        builder.Append($"  <Project Path=\"src/{name}.Core/{name}.Core.csproj\" />\n");
-        foreach (var head in heads)
-            builder.Append($"  <Project Path=\"src/{name}.{head.ProjectSuffix}/{name}.{head.ProjectSuffix}.csproj\" />\n");
-        if (libraries.Count > 0)
-        {
-            builder.Append("  <Folder Name=\"/Libraries/\">\n");
-            foreach (var library in libraries)
-                builder.Append($"    <Project Path=\"src/libs/{library}/{library}.csproj\" />\n");
-            builder.Append("  </Folder>\n");
-            builder.Append("  <Folder Name=\"/Tests/\">\n");
-            foreach (var library in libraries)
-                builder.Append($"    <Project Path=\"tests/libs/{library}.Tests/{library}.Tests.csproj\" />\n");
-            builder.Append("  </Folder>\n");
-        }
-        builder.Append("</Solution>\n");
-        return builder.ToString();
-    }
 }

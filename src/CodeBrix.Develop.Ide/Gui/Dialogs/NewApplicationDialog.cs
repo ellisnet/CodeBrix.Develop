@@ -326,6 +326,9 @@ public class NewApplicationDialog
             progressLabel.SetText("Generating project files…");
             var slnxPath = await Task.Run(() => ApplicationTemplate.Generate(options));
 
+            progressLabel.SetText("Updating package versions…");
+            await ApplicationTemplate.BumpApplicationPackageVersionsAsync(Path.GetDirectoryName((string) slnxPath));
+
             window.Close();
             Created?.Invoke(slnxPath);
         }

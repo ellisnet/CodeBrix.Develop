@@ -13,6 +13,7 @@ using System.IO;
 using System.Threading.Tasks;
 using CodeBrix.Develop.Core;
 using CodeBrix.Develop.Core.Options;
+using CodeBrix.Develop.Core.Templates;
 using CodeBrix.Develop.Ide;
 using CodeBrix.Develop.Ide.Themes;
 using Gio = CodeBrix.Develop.UI.Gio;
@@ -33,6 +34,10 @@ static class Program
         // auto-backup + pruning — before any UI exists, so everything below
         // can read configuration.
         PropertyService.Initialize();
+
+        // Launch-time background check for a newer New-Application template on
+        // CodeBrix.Platform main (throttled, best-effort, never blocks startup).
+        TemplateUpdater.StartBackgroundCheck();
 
         // Last-resort exception handling. Without a handler, an exception
         // escaping a GTK signal handler terminates the process at the native

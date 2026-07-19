@@ -23,4 +23,11 @@
     <ProjectReference Include="..\..\src\CodeBrix.Develop.Core\CodeBrix.Develop.Core.csproj" />
   </ItemGroup>
 
+  <ItemGroup>
+    <!-- ApplicationTemplate.Generate extracts the on-disk templates/TemplateApp.zip,
+         located by walking up from the executable. Copy the repo's baseline into the
+         test output so generation resolves it during tests. -->
+    <None Include="..\..\src\templates\TemplateApp.zip" Link="templates\TemplateApp.zip" CopyToOutputDirectory="PreserveNewest" />
+  </ItemGroup>
+
 </Project>
