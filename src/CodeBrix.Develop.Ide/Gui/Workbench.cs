@@ -1250,8 +1250,25 @@ public class Workbench
     void ShowNewApplicationDialog()
     {
         var dialog = new NewApplicationDialog(window);
-        dialog.Created += slnxPath => _ = LoadSolutionAsync(slnxPath);
+        dialog.Created += (slnxPath, warning) => _ = OpenNewApplicationAsync(slnxPath, warning);
+        dialog.Failed += message =>
+        {
+            // The generated files are still there; the IDE Log says why the
+            // process could not be finished.
+            ShowStatus(message);
+            ShowBottomTab(ideLog.Widget);
+        };
         dialog.Present();
+    }
+
+    // Opens a just-generated application, then — after the load has had its
+    // say on the status bar — reports anything the generation could not
+    // finish, such as package versions that could not be looked up.
+    async Task OpenNewApplicationAsync(FilePath slnxPath, string? warning)
+    {
+        await LoadSolutionAsync(slnxPath);
+        if (!string.IsNullOrEmpty(warning))
+            ShowStatus(warning);
     }
 
     void ShowOptions()

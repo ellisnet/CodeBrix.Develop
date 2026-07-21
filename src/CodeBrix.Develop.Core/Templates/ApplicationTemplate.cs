@@ -14,8 +14,6 @@ using System.IO.Compression;
 using System.Linq;
 using System.Text;
 using System.Text.RegularExpressions;
-using System.Threading;
-using System.Threading.Tasks;
 using CodeBrix.Develop.Core.Projects;
 
 namespace CodeBrix.Develop.Core.Templates;
@@ -43,14 +41,6 @@ public class ApplicationTemplateOptions
     /// tests/libs/&lt;Name&gt;.&lt;Suffix&gt;.Tests project.
     /// </summary>
     public IReadOnlyList<string> LibrarySuffixes { get; set; } = Array.Empty<string>();
-
-    /// <summary>
-    /// Resolved package versions (id → version) for the generated test
-    /// projects; a missing or null entry emits that PackageReference without a
-    /// Version attribute.
-    /// </summary>
-    public IReadOnlyDictionary<string, string> PackageVersions { get; set; } =
-        new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
 }
 
 /// <summary>
@@ -62,6 +52,13 @@ public class ApplicationTemplateOptions
 /// libraries under src/libs with their test projects are generated alongside.
 /// Whatever the archive contains is what a new application gets — updating the
 /// archive updates the output with no change here.
+/// <para>
+/// Every package reference generated here carries a working version, taken
+/// from the archive, derived from the archive, or hard-coded below; nothing
+/// is looked up while generating. Bringing those versions up to date is
+/// <see cref="ApplicationPackageVersionUpdater"/>'s job, and runs afterward
+/// against the finished solution.
+/// </para>
 /// </summary>
 public static class ApplicationTemplate
 {
@@ -84,6 +81,26 @@ public static class ApplicationTemplate
         "xunit.runner.visualstudio",
         "xunit.v3",
     };
+
+    /// <summary>
+    /// The package whose version in the template supplies the generated test
+    /// projects' Microsoft.Extensions.* versions.
+    /// </summary>
+    public const string HostingPackageId = "Microsoft.Extensions.Hosting";
+
+    // The versions written for the test-project packages the template cannot
+    // supply. They are a snapshot, deliberately: the version updater moves
+    // them to the latest release on every successful run, and they only get
+    // used as-is when nuget.org cannot be reached. Adding a package to
+    // TestPackageIds means adding its version here.
+    static readonly IReadOnlyDictionary<string, string> testPackageVersions =
+        new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase)
+        {
+            ["Microsoft.NET.Test.Sdk"] = "18.8.1",
+            ["SilverAssertions.ApacheLicenseForever"] = "1.0.164.180",
+            ["xunit.runner.visualstudio"] = "3.1.5",
+            ["xunit.v3"] = "3.2.2",
+        };
 
     /// <summary>
     /// Validates an application name (or a library assembly suffix):
@@ -126,16 +143,6 @@ public static class ApplicationTemplate
     }
 
     /// <summary>
-    /// The package ids whose latest versions should be resolved before
-    /// <see cref="Generate"/> so the generated test projects can pin explicit
-    /// versions — only relevant when extra libraries are requested (the
-    /// application projects themselves come versioned from the archive and are
-    /// updated afterward by <see cref="BumpApplicationPackageVersionsAsync"/>).
-    /// </summary>
-    public static IReadOnlyList<string> GetRequiredPackageIds(ApplicationTemplateOptions options)
-        => options.LibrarySuffixes.Count > 0 ? TestPackageIds : Array.Empty<string>();
-
-    /// <summary>
     /// Generates the application below &lt;Location&gt;/&lt;Name&gt;/ and
     /// returns the path of the created .slnx file. The target folder must
     /// not already exist (an existing folder means the name is taken).
@@ -163,18 +170,50 @@ public static class ApplicationTemplate
 
         var libraries = options.LibrarySuffixes.Select(suffix => $"{name}.{suffix}").ToList();
 
-        ExtractApplication(options, root, name);
-        GenerateLibraries(options, root, name, libraries);
+        // Everything the generated files need is validated before a single
+        // file is written, so a template that cannot supply it fails with
+        // nothing left on disk.
+        var archiveBytes = TemplateArchive.GetActiveArchiveBytes();
+        var hostingVersion = ReadHostingVersion(archiveBytes);
+        var font = ApplicationFontInfo.Get(options.Font);
+        if (options.Font != ApplicationFontInfo.DefaultFont && font.FallbackVersion == null)
+            throw new InvalidOperationException(
+                $"The {font.DisplayName} font has no package version; every font other than the default must supply one.");
+
+        ExtractApplication(options, root, name, archiveBytes);
+        GenerateLibraries(options, root, name, libraries, hostingVersion);
 
         var slnxPath = Path.Combine(root, $"{name}.slnx");
         LoggingService.LogInfo($"New CodeBrix.Platform application generated: {slnxPath}");
         return new FilePath(slnxPath);
     }
 
+    // The Microsoft.Extensions.Hosting version the template's .Core project
+    // carries — the version the generated test projects use for it and for
+    // Microsoft.Extensions.DependencyInjection. A template that no longer
+    // supplies it cannot produce a correct application.
+    static string ReadHostingVersion(byte[] archiveBytes)
+    {
+        using var archive = new ZipArchive(new MemoryStream(archiveBytes), ZipArchiveMode.Read);
+        foreach (var entry in archive.Entries)
+        {
+            if (!entry.FullName.EndsWith(".Core.csproj", StringComparison.OrdinalIgnoreCase))
+                continue;
+            using var entryStream = entry.Open();
+            using var reader = new StreamReader(entryStream);
+            var version = PackageReferenceReader.ReadVersion(reader.ReadToEnd(), HostingPackageId);
+            if (!string.IsNullOrWhiteSpace(version))
+                return version;
+            break;
+        }
+        throw new InvalidOperationException(
+            $"The application template no longer supplies a {HostingPackageId} version in its .Core project; the generated test projects cannot be versioned.");
+    }
+
     // Extracts the archive into <root>, applying the name/GUID/head/font
     // transforms. Directory entries are ignored (folders are created from the
     // files that land in them).
-    static void ExtractApplication(ApplicationTemplateOptions options, string root, string name)
+    static void ExtractApplication(ApplicationTemplateOptions options, string root, string name, byte[] archiveBytes)
     {
         var selectedSuffixes = new HashSet<string>(
             options.Heads.Select(head => PlatformHeadInfo.Get(head).ProjectSuffix), StringComparer.OrdinalIgnoreCase);
@@ -182,14 +221,13 @@ public static class ApplicationTemplate
             PlatformHeadInfo.All.Select(head => head.ProjectSuffix), StringComparer.OrdinalIgnoreCase);
 
         var newGuid = Guid.NewGuid().ToString();
-        var openSans = ApplicationFontInfo.Get(ApplicationFont.OpenSans);
+        var openSans = ApplicationFontInfo.Get(ApplicationFontInfo.DefaultFont);
         var font = ApplicationFontInfo.Get(options.Font);
-        var switchFont = options.Font != ApplicationFont.OpenSans;
+        var switchFont = options.Font != ApplicationFontInfo.DefaultFont;
 
         var token = TemplateArchive.TemplateToken;
         var rootPrefix = token + "/";
 
-        var archiveBytes = TemplateArchive.GetActiveArchiveBytes();
         using var archive = new ZipArchive(new MemoryStream(archiveBytes), ZipArchiveMode.Read);
         foreach (var entry in archive.Entries)
         {
@@ -229,6 +267,10 @@ public static class ApplicationTemplate
                     .Replace(openSans.FontFamilyValue, font.FontFamilyValue)
                     .Replace(openSans.ResourceKey, font.ResourceKey)
                     .Replace(openSans.DisplayName, font.DisplayName);
+                // The template carries the DEFAULT font's version, which says
+                // nothing about the chosen font: swap the version too.
+                if (outRelative.EndsWith(".csproj", StringComparison.OrdinalIgnoreCase))
+                    text = PackageReferenceRewriter.UpdateVersion(text, font.PackageId, font.FallbackVersion, out _);
             }
             if (IsSharedProjectFile(outRelative))
                 text = ReplaceSharedProjectGuid(text, newGuid);
@@ -295,7 +337,7 @@ public static class ApplicationTemplate
     // wires them into .Core (a ProjectReference each) and the .slnx (the
     // Libraries and Tests solution folders).
     static void GenerateLibraries(ApplicationTemplateOptions options, string root, string name,
-        IReadOnlyList<string> libraries)
+        IReadOnlyList<string> libraries, string hostingVersion)
     {
         if (libraries.Count == 0)
             return;
@@ -307,7 +349,7 @@ public static class ApplicationTemplate
             Write(libraryDirectory, "InternalsVisibleTo.cs", InternalsVisibleToCs(library));
 
             var testsDirectory = Path.Combine(root, "tests", "libs", $"{library}.Tests");
-            Write(testsDirectory, $"{library}.Tests.csproj", TestsCsproj(library, options));
+            Write(testsDirectory, $"{library}.Tests.csproj", TestsCsproj(library, hostingVersion));
             Write(testsDirectory, "BasicTests.cs", BasicTestsCs(library));
         }
 
@@ -355,94 +397,20 @@ public static class ApplicationTemplate
         File.WriteAllText(Path.Combine(directory, fileName), content);
     }
 
-    // Package ids kept at the archive's baked version (never bumped): the
-    // CodeBrix.Platform runtime that must move as one matched set — the core
-    // package and every platform-head runtime. Everything else (the font
-    // package, Microsoft.Extensions.*, …) is bumped to its latest release.
-    static bool IsRuntimeLockstepPackage(string packageId) =>
-        packageId.Equals("CodeBrix.Platform.ApacheLicenseForever", StringComparison.OrdinalIgnoreCase)
-        || packageId.StartsWith("CodeBrix.Platform.Runtime.", StringComparison.OrdinalIgnoreCase);
-
-    static readonly Regex packageReferenceIdPattern = new Regex(
-        @"<PackageReference\b[^>]*\bInclude\s*=\s*""([^""]+)""",
-        RegexOptions.IgnoreCase | RegexOptions.Compiled);
-
-    /// <summary>
-    /// Bumps the generated application's bumpable NuGet references to their
-    /// latest published versions — the .Core and platform-head projects only
-    /// (the library test projects were already generated at resolved
-    /// versions). The CodeBrix.Platform runtime lockstep is left at the
-    /// archive's baked version; a package whose latest version cannot be
-    /// resolved (offline) keeps its baked version. Best-effort: never throws.
-    /// </summary>
-    public static async Task BumpApplicationPackageVersionsAsync(
-        string applicationRoot, CancellationToken cancellationToken = default)
+    // The version a generated test project references a package at: the
+    // template's own Microsoft.Extensions.Hosting version for the
+    // Microsoft.Extensions.* pair, and the hard-coded snapshot for the rest.
+    // Never null — an unversioned PackageReference resolves to the LOWEST
+    // published version, not the latest.
+    static string TestPackageVersion(string packageId, string hostingVersion)
     {
-        try
-        {
-            var sourceRoot = Path.Combine(applicationRoot, "src");
-            if (!Directory.Exists(sourceRoot))
-                return;
-
-            var librariesRoot = Path.Combine(sourceRoot, "libs") + Path.DirectorySeparatorChar;
-            var projectPaths = Directory.EnumerateFiles(sourceRoot, "*.csproj", SearchOption.AllDirectories)
-                .Where(path => !path.StartsWith(librariesRoot, StringComparison.Ordinal))
-                .ToList();
-            if (projectPaths.Count == 0)
-                return;
-
-            var texts = new Dictionary<string, string>(StringComparer.Ordinal);
-            var bumpableIds = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
-            foreach (var path in projectPaths)
-            {
-                var text = File.ReadAllText(path);
-                texts[path] = text;
-                foreach (Match match in packageReferenceIdPattern.Matches(text))
-                {
-                    var id = match.Groups[1].Value;
-                    if (!IsRuntimeLockstepPackage(id))
-                        bumpableIds.Add(id);
-                }
-            }
-            if (bumpableIds.Count == 0)
-                return;
-
-            var resolver = new PackageVersionResolver();
-            var versions = await resolver.ResolveLatestVersionsAsync(bumpableIds, cancellationToken).ConfigureAwait(false);
-
-            foreach (var path in projectPaths)
-            {
-                var text = texts[path];
-                var changed = false;
-                foreach (var pair in versions)
-                {
-                    if (pair.Value == null)
-                        continue;
-                    text = PackageReferenceRewriter.UpdateVersion(text, pair.Key, pair.Value, out var updated);
-                    changed |= updated;
-                }
-                if (changed)
-                    File.WriteAllText(path, text);
-            }
-        }
-        catch (OperationCanceledException)
-        {
-            throw;
-        }
-        catch (Exception ex)
-        {
-            LoggingService.LogWarning($"Package version bump skipped: {ex.Message}");
-        }
-    }
-
-    // <PackageReference Include="..." Version="..." /> — or unversioned when
-    // no version could be resolved (the first restore then picks one).
-    static string PackageReference(string packageId, ApplicationTemplateOptions options, string indent)
-    {
-        options.PackageVersions.TryGetValue(packageId, out var version);
-        return version == null
-            ? $"{indent}<PackageReference Include=\"{packageId}\" />"
-            : $"{indent}<PackageReference Include=\"{packageId}\" Version=\"{version}\" />";
+        if (string.Equals(packageId, HostingPackageId, StringComparison.OrdinalIgnoreCase)
+            || string.Equals(packageId, "Microsoft.Extensions.DependencyInjection", StringComparison.OrdinalIgnoreCase))
+            return hostingVersion;
+        if (testPackageVersions.TryGetValue(packageId, out var version))
+            return version;
+        throw new InvalidOperationException(
+            $"No version is defined for the generated test projects' {packageId} package reference.");
     }
 
     static string LibraryCsproj() => """
@@ -461,24 +429,22 @@ public static class ApplicationTemplate
 
         """;
 
-    static string TestsCsproj(string libraryName, ApplicationTemplateOptions options)
+    static string TestsCsproj(string libraryName, string hostingVersion)
     {
         var packageLines = new StringBuilder();
         foreach (var id in TestPackageIds)
         {
+            var version = TestPackageVersion(id, hostingVersion);
             if (id == "xunit.runner.visualstudio")
             {
-                options.PackageVersions.TryGetValue(id, out var runnerVersion);
-                var versionAttribute = runnerVersion == null ? "" : $" Version=\"{runnerVersion}\"";
-                packageLines.Append($"    <PackageReference Include=\"{id}\"{versionAttribute}>\n");
+                packageLines.Append($"    <PackageReference Include=\"{id}\" Version=\"{version}\">\n");
                 packageLines.Append("      <PrivateAssets>all</PrivateAssets>\n");
                 packageLines.Append("      <IncludeAssets>runtime; build; native; contentfiles; analyzers; buildtransitive</IncludeAssets>\n");
                 packageLines.Append("    </PackageReference>\n");
             }
             else
             {
-                packageLines.Append(PackageReference(id, options, "    "));
-                packageLines.Append('\n');
+                packageLines.Append($"    <PackageReference Include=\"{id}\" Version=\"{version}\" />\n");
             }
         }
 

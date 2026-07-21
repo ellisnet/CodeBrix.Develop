@@ -43,15 +43,28 @@ public sealed class ApplicationFontInfo
     /// <summary>The App.xaml resource key the views reference (e.g. "OpenSansFont").</summary>
     public string ResourceKey { get; }
 
+    /// <summary>
+    /// The package version written when this font is chosen, or null for the
+    /// default font — whose version comes from the template archive. Every
+    /// font added here other than the default MUST supply one: choosing a
+    /// non-default font swaps the package id in the template's text, but the
+    /// template only ever carries the default font's version.
+    /// </summary>
+    public string FallbackVersion { get; }
+
     ApplicationFontInfo(ApplicationFont font, string displayName, string packageId,
-        string fontFamilyValue, string resourceKey)
+        string fontFamilyValue, string resourceKey, string fallbackVersion)
     {
         Font = font;
         DisplayName = displayName;
         PackageId = packageId;
         FontFamilyValue = fontFamilyValue;
         ResourceKey = resourceKey;
+        FallbackVersion = fallbackVersion;
     }
+
+    /// <summary>The default font — the one the template archive is built around.</summary>
+    public const ApplicationFont DefaultFont = ApplicationFont.OpenSans;
 
     /// <summary>All fonts, in the order they are offered to the user.</summary>
     public static IReadOnlyList<ApplicationFontInfo> All { get; } = new[]
@@ -59,11 +72,14 @@ public sealed class ApplicationFontInfo
         new ApplicationFontInfo(ApplicationFont.OpenSans, "Open Sans",
             "CodeBrix.Platform.Fonts.OpenSans.ApacheLicenseForever",
             "ms-appx:///CodeBrix.Platform.Fonts.OpenSans/Fonts/OpenSans.ttf",
-            "OpenSansFont"),
+            "OpenSansFont",
+            // The default font: its version comes from the template archive.
+            null),
         new ApplicationFontInfo(ApplicationFont.Roboto, "Roboto",
             "CodeBrix.Platform.Fonts.Roboto.OflLicenseForever",
             "ms-appx:///CodeBrix.Platform.Fonts.Roboto/Fonts/Roboto.ttf#Roboto",
-            "RobotoFont"),
+            "RobotoFont",
+            "1.0.181.661"),
     };
 
     /// <summary>Returns the info record for the given font.</summary>

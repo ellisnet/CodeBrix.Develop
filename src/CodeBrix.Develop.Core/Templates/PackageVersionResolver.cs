@@ -7,22 +7,24 @@
 
 using System;
 using System.Collections.Generic;
-using System.IO;
 using System.Linq;
+using System.Net;
 using System.Net.Http;
 using System.Text.Json;
 using System.Threading;
 using System.Threading.Tasks;
+using System.Xml.Linq;
 
 namespace CodeBrix.Develop.Core.Templates;
 
 /// <summary>
-/// Resolves the latest published version of NuGet packages so generated
-/// project files can pin explicit Version attributes. Tries nuget.org
-/// first, falls back to the newest version present in the local NuGet
-/// cache (~/.nuget/packages), and reports null when neither knows the
-/// package — the caller then emits the reference unversioned and lets the
-/// first restore resolve it.
+/// Reads package version facts from nuget.org — the only authoritative
+/// source of package version information: the latest non-preview version of
+/// a package, and the dependencies a specific published package version
+/// declares. No other source (the local NuGet cache included) is consulted,
+/// and a lookup that cannot be completed raises
+/// <see cref="NuGetUnavailableException"/> so the caller can end the whole
+/// version-bump operation rather than proceed on partial data.
 /// </summary>
 public class PackageVersionResolver
 {
@@ -31,24 +33,13 @@ public class PackageVersionResolver
         Timeout = TimeSpan.FromSeconds(15),
     };
 
-    readonly string localCacheRoot;
-
-    /// <summary>Creates a resolver using the default local NuGet cache location.</summary>
-    public PackageVersionResolver() : this(null)
-    {
-    }
-
-    internal PackageVersionResolver(string localCacheRootOverride)
-    {
-        localCacheRoot = localCacheRootOverride ?? Path.Combine(
-            Environment.GetFolderPath(Environment.SpecialFolder.UserProfile), ".nuget", "packages");
-    }
-
     /// <summary>
-    /// Resolves the latest stable version for each package id, querying
-    /// nuget.org concurrently. Entries whose version could not be
-    /// determined map to null.
+    /// The latest non-preview version of each package id. A package
+    /// nuget.org does not know, and a package whose only published versions
+    /// are previews, is absent from the result — that means "leave this
+    /// package's version alone", not a failure.
     /// </summary>
+    /// <exception cref="NuGetUnavailableException">A lookup could not be completed.</exception>
     public async Task<IReadOnlyDictionary<string, string>> ResolveLatestVersionsAsync(
         IEnumerable<string> packageIds, CancellationToken cancellationToken = default)
     {
@@ -58,123 +49,127 @@ public class PackageVersionResolver
 
         var results = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
         for (var i = 0; i < ids.Count; i++)
-            results[ids[i]] = versions[i];
+        {
+            if (versions[i] != null)
+                results[ids[i]] = versions[i];
+        }
         return results;
     }
 
-    async Task<string> ResolveOneAsync(string packageId, CancellationToken cancellationToken)
+    /// <summary>
+    /// The dependencies declared by one published package version, as
+    /// dependency id → every version string declared for it (a package may
+    /// declare the same dependency in more than one target-framework group).
+    /// Ids are compared case-insensitively, as NuGet ids are.
+    /// </summary>
+    /// <exception cref="NuGetUnavailableException">The .nuspec could not be read.</exception>
+    public async Task<IReadOnlyDictionary<string, IReadOnlyList<string>>> ResolveDependencyVersionsAsync(
+        string packageId, string version, CancellationToken cancellationToken = default)
     {
-        var fromNuget = await TryGetNugetOrgVersionAsync(packageId, cancellationToken).ConfigureAwait(false);
-        if (fromNuget != null)
-            return fromNuget;
+        var lowerId = packageId.ToLowerInvariant();
+        var url = $"https://api.nuget.org/v3-flatcontainer/{lowerId}/{version.ToLowerInvariant()}/{lowerId}.nuspec";
 
-        var fromCache = GetNewestLocalCacheVersion(packageId);
-        if (fromCache != null)
-        {
-            LoggingService.LogInfo($"Package {packageId}: using version {fromCache} from the local NuGet cache (nuget.org unavailable)");
-            return fromCache;
-        }
-
-        LoggingService.LogWarning($"Package {packageId}: latest version unknown; the reference will be generated unversioned");
-        return null;
-    }
-
-    async Task<string> TryGetNugetOrgVersionAsync(string packageId, CancellationToken cancellationToken)
-    {
+        string nuspec;
         try
         {
-            using var timeout = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
-            timeout.CancelAfter(TimeSpan.FromSeconds(10));
-            var url = $"https://api.nuget.org/v3-flatcontainer/{packageId.ToLowerInvariant()}/index.json";
-            using var response = await httpClient.GetAsync(url, timeout.Token).ConfigureAwait(false);
+            using var response = await httpClient.GetAsync(url, cancellationToken).ConfigureAwait(false);
             if (!response.IsSuccessStatusCode)
-                return null;
-
-            using var stream = await response.Content.ReadAsStreamAsync(timeout.Token).ConfigureAwait(false);
-            using var document = await JsonDocument.ParseAsync(stream, cancellationToken: timeout.Token).ConfigureAwait(false);
-            var versions = document.RootElement.GetProperty("versions")
-                .EnumerateArray()
-                .Select(element => element.GetString())
-                .Where(version => !string.IsNullOrEmpty(version))
-                .ToList();
-            return PickNewest(versions);
+                throw new NuGetUnavailableException(
+                    $"nuget.org returned {(int) response.StatusCode} for the {packageId} {version} package manifest.");
+            nuspec = await response.Content.ReadAsStringAsync(cancellationToken).ConfigureAwait(false);
         }
         catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
         {
             throw;
         }
+        catch (NuGetUnavailableException)
+        {
+            throw;
+        }
         catch (Exception ex)
         {
-            LoggingService.LogWarning($"Package {packageId}: nuget.org lookup failed: {ex.Message}");
-            return null;
+            throw new NuGetUnavailableException(
+                $"The {packageId} {version} package manifest could not be read from nuget.org: {ex.Message}", ex);
         }
-    }
 
-    internal string GetNewestLocalCacheVersion(string packageId)
-    {
+        var dependencies = new Dictionary<string, List<string>>(StringComparer.OrdinalIgnoreCase);
         try
         {
-            var packageFolder = Path.Combine(localCacheRoot, packageId.ToLowerInvariant());
-            if (!Directory.Exists(packageFolder))
-                return null;
-            var versions = Directory.EnumerateDirectories(packageFolder)
-                .Select(Path.GetFileName)
-                .Where(name => !string.IsNullOrEmpty(name))
-                .ToList();
-            return PickNewest(versions);
+            var document = XDocument.Parse(nuspec);
+            // The .nuspec namespace varies by schema version, so match on the
+            // local element name rather than a fixed namespace.
+            foreach (var element in document.Descendants().Where(e => e.Name.LocalName == "dependency"))
+            {
+                var id = (string) element.Attribute("id");
+                if (string.IsNullOrWhiteSpace(id))
+                    continue;
+                var declared = (string) element.Attribute("version");
+                if (string.IsNullOrWhiteSpace(declared))
+                    continue;
+                if (!dependencies.TryGetValue(id, out var declaredVersions))
+                    dependencies[id] = declaredVersions = new List<string>();
+                declaredVersions.Add(declared);
+            }
         }
         catch (Exception ex)
         {
-            LoggingService.LogWarning($"Package {packageId}: local NuGet cache lookup failed: {ex.Message}");
-            return null;
+            throw new NuGetUnavailableException(
+                $"The {packageId} {version} package manifest from nuget.org could not be parsed: {ex.Message}", ex);
         }
+
+        return dependencies.ToDictionary(
+            pair => pair.Key,
+            pair => (IReadOnlyList<string>) pair.Value,
+            StringComparer.OrdinalIgnoreCase);
     }
 
-    // The newest version, preferring stable releases over prereleases.
-    internal static string PickNewest(IReadOnlyList<string> versions)
+    // The latest non-preview version, or null when nuget.org does not know
+    // the package or publishes nothing but previews for it.
+    async Task<string> ResolveOneAsync(string packageId, CancellationToken cancellationToken)
     {
-        if (versions == null || versions.Count == 0)
-            return null;
-        var stable = versions.Where(version => !version.Contains('-')).ToList();
-        var pool = stable.Count > 0 ? stable : versions;
-        return pool.OrderBy(version => version, VersionComparer.Instance).Last();
-    }
-
-    // Compares dotted numeric versions (with any prerelease tag stripped);
-    // a stable version sorts above the same numbers with a prerelease tag.
-    sealed class VersionComparer : IComparer<string>
-    {
-        public static readonly VersionComparer Instance = new VersionComparer();
-
-        public int Compare(string x, string y)
+        var url = $"https://api.nuget.org/v3-flatcontainer/{packageId.ToLowerInvariant()}/index.json";
+        try
         {
-            var (xParts, xPrerelease) = Parse(x);
-            var (yParts, yPrerelease) = Parse(y);
-            for (var i = 0; i < Math.Max(xParts.Length, yParts.Length); i++)
+            using var response = await httpClient.GetAsync(url, cancellationToken).ConfigureAwait(false);
+            if (response.StatusCode == HttpStatusCode.NotFound)
             {
-                var xValue = i < xParts.Length ? xParts[i] : 0;
-                var yValue = i < yParts.Length ? yParts[i] : 0;
-                if (xValue != yValue)
-                    return xValue.CompareTo(yValue);
+                // A successful answer of "no such package": nothing to update.
+                LoggingService.LogInfo($"Package {packageId}: not published on nuget.org; its version is left as-is");
+                return null;
             }
-            if (xPrerelease == null && yPrerelease == null)
-                return 0;
-            if (xPrerelease == null)
-                return 1;
-            if (yPrerelease == null)
-                return -1;
-            return string.CompareOrdinal(xPrerelease, yPrerelease);
-        }
+            if (!response.IsSuccessStatusCode)
+                throw new NuGetUnavailableException(
+                    $"nuget.org returned {(int) response.StatusCode} for {packageId}.");
 
-        static (int[] Parts, string Prerelease) Parse(string version)
+            using var stream = await response.Content.ReadAsStreamAsync(cancellationToken).ConfigureAwait(false);
+            using var document = await JsonDocument.ParseAsync(stream, cancellationToken: cancellationToken).ConfigureAwait(false);
+            if (!document.RootElement.TryGetProperty("versions", out var versionsElement)
+                || versionsElement.ValueKind != JsonValueKind.Array)
+                throw new NuGetUnavailableException($"nuget.org returned no version list for {packageId}.");
+
+            var versions = versionsElement.EnumerateArray()
+                .Where(element => element.ValueKind == JsonValueKind.String)
+                .Select(element => element.GetString())
+                .Where(version => !string.IsNullOrEmpty(version))
+                .ToList();
+
+            var latest = NuGetVersion.SelectLatestRelease(versions);
+            if (latest == null)
+                LoggingService.LogInfo($"Package {packageId}: no non-preview version published; its version is left as-is");
+            return latest;
+        }
+        catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
         {
-            var dash = version.IndexOf('-');
-            var prerelease = dash < 0 ? null : version.Substring(dash + 1);
-            var release = dash < 0 ? version : version.Substring(0, dash);
-            var parts = release.Split('.')
-                .Select(part => int.TryParse(part, out var value) ? value : 0)
-                .ToArray();
-            return (parts, prerelease);
+            throw;
+        }
+        catch (NuGetUnavailableException)
+        {
+            throw;
+        }
+        catch (Exception ex)
+        {
+            throw new NuGetUnavailableException(
+                $"The latest version of {packageId} could not be read from nuget.org: {ex.Message}", ex);
         }
     }
 }

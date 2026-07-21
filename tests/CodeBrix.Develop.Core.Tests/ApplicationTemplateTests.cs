@@ -1,5 +1,4 @@
 using System;
-using System.Collections.Generic;
 using System.IO;
 using System.Linq;
 using CodeBrix.Develop.Core.Projects;
@@ -24,13 +23,8 @@ public class ApplicationTemplateTests : IDisposable
         try { Directory.Delete(tempDirectory, recursive: true); } catch { /* best effort */ }
     }
 
-    static Dictionary<string, string> FixedVersions(params string[] ids) =>
-        ids.Distinct(StringComparer.OrdinalIgnoreCase)
-            .ToDictionary(id => id, _ => "1.2.3", StringComparer.OrdinalIgnoreCase);
-
-    ApplicationTemplateOptions MakeOptions(string name = "MyNewApp", ApplicationFont font = ApplicationFont.OpenSans)
-    {
-        var options = new ApplicationTemplateOptions
+    ApplicationTemplateOptions MakeOptions(string name = "MyNewApp", ApplicationFont font = ApplicationFont.OpenSans) =>
+        new ApplicationTemplateOptions
         {
             Name = name,
             Location = tempDirectory,
@@ -38,11 +32,6 @@ public class ApplicationTemplateTests : IDisposable
             Font = font,
             LibrarySuffixes = new[] { "Graphics", "DatabaseAccess" },
         };
-        // Only the generated test projects take up-front-resolved versions now; the
-        // application projects come versioned from the archive.
-        options.PackageVersions = FixedVersions(ApplicationTemplate.GetRequiredPackageIds(options).ToArray());
-        return options;
-    }
 
     [Fact]
     public void Generate_creates_the_full_layout()
@@ -217,20 +206,49 @@ public class ApplicationTemplateTests : IDisposable
     }
 
     [Fact]
-    public void Unresolved_test_package_versions_are_emitted_unversioned()
+    public void Generated_test_projects_reference_every_package_with_a_version()
     {
-        //Arrange — no resolved versions available.
-        var options = MakeOptions();
-        options.PackageVersions = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
-
         //Act
-        ApplicationTemplate.Generate(options);
+        ApplicationTemplate.Generate(MakeOptions());
+        var root = Path.Combine(tempDirectory, "MyNewApp");
 
-        //Assert — the generated test project emits its references unversioned
-        // (the first restore then resolves them).
-        var testsCsproj = File.ReadAllText(Path.Combine(tempDirectory, "MyNewApp",
+        //Assert — an unversioned PackageReference resolves to the LOWEST
+        // published version, so every reference must carry one.
+        var testsCsproj = File.ReadAllText(Path.Combine(root,
             "tests", "libs", "MyNewApp.Graphics.Tests", "MyNewApp.Graphics.Tests.csproj"));
-        testsCsproj.Should().Contain("<PackageReference Include=\"Microsoft.NET.Test.Sdk\" />");
+        var references = PackageReferenceReader.Read(testsCsproj);
+        references.Select(reference => reference.Id).Should().BeEquivalentTo(ApplicationTemplate.TestPackageIds);
+        references.All(reference => !string.IsNullOrWhiteSpace(reference.Version)).Should().BeTrue();
+
+        // The Microsoft.Extensions.* pair takes the template's own Hosting version...
+        var coreCsproj = File.ReadAllText(Path.Combine(root, "src", "MyNewApp.Core", "MyNewApp.Core.csproj"));
+        var hostingVersion = PackageReferenceReader.ReadVersion(coreCsproj, "Microsoft.Extensions.Hosting");
+        hostingVersion.Should().NotBeNull();
+        PackageReferenceReader.ReadVersion(testsCsproj, "Microsoft.Extensions.Hosting").Should().Be(hostingVersion);
+        PackageReferenceReader.ReadVersion(testsCsproj, "Microsoft.Extensions.DependencyInjection").Should().Be(hostingVersion);
+
+        //...and the packages the template knows nothing about are pinned here.
+        PackageReferenceReader.ReadVersion(testsCsproj, "Microsoft.NET.Test.Sdk").Should().Be("18.8.1");
+        PackageReferenceReader.ReadVersion(testsCsproj, "SilverAssertions.ApacheLicenseForever").Should().Be("1.0.164.180");
+        PackageReferenceReader.ReadVersion(testsCsproj, "xunit.v3").Should().Be("3.2.2");
+        // The runner keeps its expanded form (PrivateAssets/IncludeAssets children).
+        PackageReferenceReader.ReadVersion(testsCsproj, "xunit.runner.visualstudio").Should().Be("3.1.5");
+        testsCsproj.Should().Contain("<PrivateAssets>all</PrivateAssets>");
+    }
+
+    [Fact]
+    public void Roboto_font_reference_carries_the_roboto_package_version()
+    {
+        //Act
+        ApplicationTemplate.Generate(MakeOptions(font: ApplicationFont.Roboto));
+
+        //Assert — the font swap replaces the package id in the template's
+        // text, so the version has to be swapped too: the template only ever
+        // carries the DEFAULT font's version, which does not exist for Roboto.
+        var coreCsproj = File.ReadAllText(Path.Combine(tempDirectory, "MyNewApp",
+            "src", "MyNewApp.Core", "MyNewApp.Core.csproj"));
+        PackageReferenceReader.ReadVersion(coreCsproj, "CodeBrix.Platform.Fonts.Roboto.OflLicenseForever")
+            .Should().Be("1.0.181.661");
     }
 
     [Fact]
@@ -249,60 +267,63 @@ public class ApplicationTemplateTests : IDisposable
     }
 
     [Fact]
-    public void Required_package_ids_are_the_test_packages_only_when_libraries_are_requested()
+    public void Every_generated_project_file_pins_every_package_reference()
     {
-        //Arrange
-        var options = MakeOptions();
-
         //Act
-        var ids = ApplicationTemplate.GetRequiredPackageIds(options);
+        ApplicationTemplate.Generate(MakeOptions(font: ApplicationFont.Roboto));
+        var root = Path.Combine(tempDirectory, "MyNewApp");
 
-        //Assert — with libraries, the ids are exactly the test-project packages
-        // (the application projects come versioned from the archive, not here).
-        ids.Should().Contain("SilverAssertions.ApacheLicenseForever");
-        ids.Should().Contain("xunit.v3");
-        ids.Should().NotContain("CodeBrix.Platform.Runtime.Skia.MacOS.ApacheLicenseForever");
-        ids.Should().NotContain("CodeBrix.Platform.Fonts.OpenSans.ApacheLicenseForever");
-
-        // Without libraries there are no test projects, so nothing to resolve.
-        options.LibrarySuffixes = Array.Empty<string>();
-        ApplicationTemplate.GetRequiredPackageIds(options).Count.Should().Be(0);
+        //Assert — nothing anywhere in the solution is left unversioned, so an
+        // application is buildable even when nuget.org cannot be reached.
+        foreach (var path in Directory.EnumerateFiles(root, "*.csproj", SearchOption.AllDirectories))
+        {
+            foreach (var (id, version) in PackageReferenceReader.Read(File.ReadAllText(path)))
+                version.Should().NotBeNull($"{id} in {Path.GetFileName(path)} must carry a version");
+        }
     }
 }
 
-public class PackageVersionResolverTests : IDisposable
+public class NuGetVersionTests
 {
-    readonly string tempDirectory;
-
-    public PackageVersionResolverTests()
+    [Fact]
+    public void Previews_are_recognized_and_build_metadata_is_not_a_preview()
     {
-        tempDirectory = Path.Combine(Path.GetTempPath(), "codebrix-develop-tests-" + Guid.NewGuid().ToString("N"));
-        Directory.CreateDirectory(tempDirectory);
-    }
-
-    public void Dispose()
-    {
-        try { Directory.Delete(tempDirectory, recursive: true); } catch { /* best effort */ }
+        NuGetVersion.IsPreview("1.0.10").Should().BeFalse();
+        NuGetVersion.IsPreview("1.0.10-preview.1").Should().BeTrue();
+        NuGetVersion.IsPreview("1.0.199.897+abc123").Should().BeFalse();
+        NuGetVersion.IsPreview("2.0.0-rc.1+abc123").Should().BeTrue();
     }
 
     [Fact]
-    public void PickNewest_prefers_the_highest_stable_version()
+    public void Latest_release_never_selects_a_preview()
     {
-        PackageVersionResolver.PickNewest(new[] { "1.0.9", "1.0.10", "1.0.10-preview.1" }).Should().Be("1.0.10");
-        PackageVersionResolver.PickNewest(new[] { "2.0.0-rc.1", "2.0.0-rc.2" }).Should().Be("2.0.0-rc.2");
-        PackageVersionResolver.PickNewest(Array.Empty<string>()).Should().BeNull();
+        //Assert — numeric segments compare as numbers, not as text...
+        NuGetVersion.SelectLatestRelease(new[] { "1.0.9", "1.0.10", "1.0.10-preview.1" }).Should().Be("1.0.10");
+        NuGetVersion.SelectLatestRelease(new[] { "3.119.4", "4.148.0", "4.150.1" }).Should().Be("4.150.1");
+
+        //...and a package with nothing but previews published means "leave it
+        // alone", never "take the preview".
+        NuGetVersion.SelectLatestRelease(new[] { "2.0.0-rc.1", "2.0.0-rc.2" }).Should().BeNull();
+        NuGetVersion.SelectLatestRelease(Array.Empty<string>()).Should().BeNull();
     }
 
     [Fact]
-    public void Local_cache_fallback_returns_the_newest_cached_version()
+    public void Pinned_versions_are_distinguished_from_ranges()
     {
-        //Arrange — a fake ~/.nuget/packages with two cached versions.
-        Directory.CreateDirectory(Path.Combine(tempDirectory, "some.package", "1.0.2"));
-        Directory.CreateDirectory(Path.Combine(tempDirectory, "some.package", "1.0.10"));
-        var resolver = new PackageVersionResolver(tempDirectory);
+        NuGetVersion.IsPinned("4.150.1").Should().BeTrue();
+        NuGetVersion.IsPinned("14.2.1.1").Should().BeTrue();
+        NuGetVersion.IsPinned("[4.150.1]").Should().BeFalse();
+        NuGetVersion.IsPinned("[4.150.1,5.0.0)").Should().BeFalse();
+        NuGetVersion.IsPinned("4.*").Should().BeFalse();
+        NuGetVersion.IsPinned("").Should().BeFalse();
+    }
 
-        //Assert
-        resolver.GetNewestLocalCacheVersion("Some.Package").Should().Be("1.0.10");
-        resolver.GetNewestLocalCacheVersion("absent.package").Should().BeNull();
+    [Fact]
+    public void Lower_returns_the_older_version_and_tolerates_nulls()
+    {
+        NuGetVersion.Lower("4.150.1", "4.148.0").Should().Be("4.148.0");
+        NuGetVersion.Lower("1.0.201.336", null).Should().Be("1.0.201.336");
+        NuGetVersion.Lower(null, "1.0.201.336").Should().Be("1.0.201.336");
+        NuGetVersion.Lower(null, null).Should().BeNull();
     }
 }

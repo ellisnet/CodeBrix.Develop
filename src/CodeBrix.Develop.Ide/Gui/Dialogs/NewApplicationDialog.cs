@@ -41,8 +41,20 @@ public class NewApplicationDialog
     readonly Gtk.Button browseButton;
     bool creating;
 
-    /// <summary>Raised with the path of the generated .slnx after a successful Create.</summary>
-    public event Action<FilePath>? Created;
+    /// <summary>
+    /// Raised with the path of the generated .slnx after a successful Create,
+    /// for the solution to be opened. The second argument is a low-key status
+    /// message to show once it is open, or null when there is nothing to say.
+    /// </summary>
+    public event Action<FilePath, string?>? Created;
+
+    /// <summary>
+    /// Raised when the application was generated but the process could not be
+    /// completed. The generated files are left on disk — they are not
+    /// deleted — but the solution is not opened. The argument is a status
+    /// message; the details are already in the IDE Log.
+    /// </summary>
+    public event Action<string>? Failed;
 
     // The heads offered, grouped by operating system. Within each group
     // only the stable head starts checked; the help text is shown in
@@ -306,6 +318,7 @@ public class NewApplicationDialog
             return;
         creating = true;
         SetBusy(true);
+        var generated = false;
         try
         {
             var options = new ApplicationTemplateOptions
@@ -318,19 +331,40 @@ public class NewApplicationDialog
                 LibrarySuffixes = ParseLibrarySuffixes(),
             };
 
-            progressLabel.SetText("Resolving latest package versions…");
-            var resolver = new PackageVersionResolver();
-            options.PackageVersions = await resolver.ResolveLatestVersionsAsync(
-                ApplicationTemplate.GetRequiredPackageIds(options));
-
+            // Generation writes working package versions of its own, so a
+            // failure here leaves nothing on disk and the dialog stays open
+            // for another try.
             progressLabel.SetText("Generating project files…");
             var slnxPath = await Task.Run(() => ApplicationTemplate.Generate(options));
+            var applicationRoot = Path.GetDirectoryName((string) slnxPath)!;
+            generated = true;
 
             progressLabel.SetText("Updating package versions…");
-            await ApplicationTemplate.BumpApplicationPackageVersionsAsync(Path.GetDirectoryName((string) slnxPath));
+            string? warning = null;
+            try
+            {
+                var updatedCount = await ApplicationPackageVersionUpdater.UpdateAsync(applicationRoot);
+                LoggingService.LogInfo($"New application package versions updated: {updatedCount} reference(s) changed.");
+            }
+            catch (NuGetUnavailableException ex)
+            {
+                // nuget.org could not answer: the application is complete and
+                // buildable on the versions it was generated with.
+                LoggingService.LogWarning($"Package versions were not updated: {ex.Message}");
+                warning = "The latest Nuget package version numbers could not be obtained.";
+            }
 
             window.Close();
-            Created?.Invoke(slnxPath);
+            Created?.Invoke(slnxPath, warning);
+        }
+        catch (Exception ex) when (generated)
+        {
+            // The application exists but could not be finished. Leave the
+            // files alone — deleting what was just created would be worse —
+            // and do not open a solution we could not complete.
+            LoggingService.LogError("New application package version update failed", ex);
+            window.Close();
+            Failed?.Invoke("The new application could not be completed — see the IDE Log.");
         }
         catch (Exception ex)
         {
