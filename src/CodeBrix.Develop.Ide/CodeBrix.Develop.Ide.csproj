@@ -14,7 +14,7 @@
   </PropertyGroup>
 
   <ItemGroup>
-    <PackageReference Include="CodeBrix.Develop.UI" Version="1.0.187.116" />
+    <PackageReference Include="CodeBrix.Develop.UI" Version="1.0.202.186" />
   </ItemGroup>
 
   <ItemGroup>
