@@ -20,6 +20,15 @@
     <PackageReference Include="Microsoft.Build.Framework" Version="18.8.2" ExcludeAssets="runtime" PrivateAssets="all">
       <IncludeAssets>compile; build; native; contentfiles; analyzers; buildtransitive</IncludeAssets>
     </PackageReference>
+    <!-- Microsoft.Build.Framework depends on Microsoft.NET.StringTools, and
+         ExcludeAssets="runtime" above applies ONLY to Framework itself - it does
+         not flow to that package's own dependencies. Without this explicit entry
+         StringTools.dll is copied to the output folder and Microsoft.Build.Locator
+         fails the build with MSBL001. Keep this version in lockstep with
+         Microsoft.Build.Framework above. -->
+    <PackageReference Include="Microsoft.NET.StringTools" Version="18.8.2" ExcludeAssets="runtime" PrivateAssets="all">
+      <IncludeAssets>compile; build; native; contentfiles; analyzers; buildtransitive</IncludeAssets>
+    </PackageReference>
   </ItemGroup>
 
 </Project>
