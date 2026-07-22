@@ -1205,7 +1205,19 @@ public class Workbench
             }
             IdePreferences.LastSolution.Value = ""; // stale path: silently forget
         }
-        ShowNewApplicationDialog();
+        // Presenting the modal dialog right here — inside the activate
+        // callback, before the compositor has actually shown the workbench
+        // window — leaves the dialog invisible on Wayland while its modal
+        // grab disables the whole main window (the startup "hang"). GTK
+        // already considers the window mapped at this point, so waiting for
+        // the map signal would not help; wait for the frame clock instead:
+        // the first tick only comes once the window is genuinely drawing on
+        // screen, and a dialog presented then behaves normally.
+        window.AddTickCallback((_, _) =>
+        {
+            ShowNewApplicationDialog();
+            return false; // one-shot
+        });
     }
 
     /// <summary>
