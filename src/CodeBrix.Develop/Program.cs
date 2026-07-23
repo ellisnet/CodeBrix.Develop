@@ -35,6 +35,11 @@ static class Program
         // can read configuration.
         PropertyService.Initialize();
 
+        // Record this machine's operating system, CPU architecture, and desktop
+        // session type as hidden options (overwriting the previous run's), then
+        // report them — before anything reads them (e.g. startup-head selection).
+        EnvironmentInfo.DetectStoreAndReport();
+
         // Launch-time background check for a newer New-Application template on
         // CodeBrix.Platform main (throttled, best-effort, never blocks startup).
         TemplateUpdater.StartBackgroundCheck();

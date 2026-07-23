@@ -1019,8 +1019,9 @@ public class Workbench
     }
 
     // Resolves the project the Run/Debug commands start, applying the
-    // first-run rule: with no explicit choice, the .LinuxX11 head becomes
-    // (and is persisted as) the startup project.
+    // first-run rule: with no explicit choice, the OS/session-appropriate head
+    // auto-selected by GetStartupProject becomes (and is persisted as) the
+    // startup project.
     DotNetProject? ResolveStartupProjectForLaunch(Solution solution)
     {
         if (IdeApp.GetStartupProject(solution) is not { } project)
@@ -1028,7 +1029,7 @@ public class Workbench
             ShowStatus("The solution has no executable project to run");
             return null;
         }
-        if (string.IsNullOrEmpty(IdePreferences.StartupProject.Value) && IdeApp.IsLinuxX11Head(project))
+        if (string.IsNullOrEmpty(IdePreferences.StartupProject.Value) && IdeApp.IsPlatformHead(project))
         {
             IdePreferences.StartupProject.Value = (string) project.FileName;
             solutionPad.RefreshStartupProject();

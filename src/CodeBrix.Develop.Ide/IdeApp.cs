@@ -9,6 +9,7 @@
 using System;
 using System.IO;
 using System.Linq;
+using CodeBrix.Develop.Core;
 using CodeBrix.Develop.Core.Projects;
 using CodeBrix.Develop.Ide.Gui;
 using Gtk = CodeBrix.Develop.UI.Gtk;
@@ -56,33 +57,68 @@ public static class IdeApp
     }
 
     /// <summary>
-    /// The project the Run command starts for the given solution: the
-    /// project chosen via "Set as Startup Project" when it is still a
-    /// member of this solution, executable, and present on disk — otherwise
-    /// the stored choice is silently blanked and the solution's default is
-    /// used: its .LinuxX11 head when it has one, else the first executable
-    /// project.
+    /// The project the Run command starts for the given solution: the project
+    /// chosen via "Set as Startup Project" when it is still a member of this
+    /// solution, executable, present on disk, and able to run on the current
+    /// operating system and desktop session — otherwise that stored choice is
+    /// silently cleared. With no usable stored choice, a CodeBrix.Platform head
+    /// is auto-selected by the OS/session preference order (see
+    /// <see cref="StartupHeadPolicy"/>), and a solution with no recognized
+    /// heads falls back to its first executable project.
     /// </summary>
     public static DotNetProject? GetStartupProject(Solution? solution)
     {
         if (solution == null)
             return null;
+
+        var operatingSystem = EnvironmentInfo.CurrentOperatingSystem;
+        var sessionType = EnvironmentInfo.CurrentDesktopSessionType;
+
         var configured = IdePreferences.StartupProject.Value;
         if (!string.IsNullOrEmpty(configured))
         {
             var match = solution.Projects.FirstOrDefault(project =>
                 string.Equals((string) project.FileName, configured, StringComparison.Ordinal));
-            if (match is { IsExecutable: true } && File.Exists(configured))
+            if (match is { IsExecutable: true } && File.Exists(configured)
+                && StartupHeadPolicy.CanRun(match.Name, operatingSystem, sessionType))
                 return match;
+            // Missing, non-executable, or a head that can't run on this machine:
+            // clear the stored choice and fall through to auto-selection.
             IdePreferences.StartupProject.Value = "";
         }
-        return solution.Projects.FirstOrDefault(project => project.IsExecutable && IsLinuxX11Head(project))
-            ?? solution.StartupProject;
+
+        var heads = solution.Projects
+            .Where(project => project.IsExecutable && StartupHeadPolicy.IsHead(project.Name))
+            .ToList();
+        if (heads.Count > 0)
+        {
+            foreach (var kind in StartupHeadPolicy.AutoStartupPreference(operatingSystem, sessionType))
+            {
+                var head = heads.FirstOrDefault(candidate =>
+                    string.Equals(StartupHeadPolicy.GetHeadKind(candidate.Name), kind, StringComparison.Ordinal));
+                if (head != null)
+                    return head;
+            }
+            return null; // a head-bearing solution with no head runnable on this machine
+        }
+
+        // A solution with no recognized heads keeps the plain default.
+        return solution.StartupProject;
     }
 
-    /// <summary>Whether the project is a CodeBrix.Platform Linux X11 head (by naming convention).</summary>
-    public static bool IsLinuxX11Head(DotNetProject project) =>
-        project.Name == "LinuxX11" || project.Name.EndsWith(".LinuxX11", StringComparison.Ordinal);
+    /// <summary>Whether the project is a recognized CodeBrix.Platform head (by naming convention).</summary>
+    public static bool IsPlatformHead(DotNetProject project) => StartupHeadPolicy.IsHead(project.Name);
+
+    /// <summary>
+    /// Whether the given project's "Set as Startup Project" command should be
+    /// available on this machine: any non-head executable, or a
+    /// CodeBrix.Platform head that can run on the current operating system and
+    /// desktop session.
+    /// </summary>
+    public static bool CanBeStartupProject(DotNetProject project) =>
+        project is { IsExecutable: true }
+        && StartupHeadPolicy.CanRun(project.Name,
+            EnvironmentInfo.CurrentOperatingSystem, EnvironmentInfo.CurrentDesktopSessionType);
 
     /// <summary>
     /// Whether the path is the IDE's own executable project file.

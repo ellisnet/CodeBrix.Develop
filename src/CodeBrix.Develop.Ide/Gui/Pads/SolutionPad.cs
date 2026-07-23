@@ -238,6 +238,14 @@ public class SolutionPad
 
         var setStartupButton = Gtk.Button.NewWithLabel("Set as Startup Project");
         setStartupButton.SetHasFrame(false);
+        // A head that can't run on the current operating system or desktop
+        // session is shown disabled rather than hidden, so it's clear why it
+        // isn't selectable.
+        var canSetStartup = IdeApp.CanBeStartupProject(project);
+        setStartupButton.SetSensitive(canSetStartup);
+        if (!canSetStartup)
+            setStartupButton.SetTooltipText(
+                "This head can't run on the current operating system or desktop session.");
         var popover = Gtk.Popover.New();
         popover.SetChild(setStartupButton);
         popover.SetParent(anchor);
