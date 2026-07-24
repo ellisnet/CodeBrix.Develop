@@ -43,12 +43,20 @@ namespace CodeBrix.Develop.Emulation.FrameBuffer.Transport;
 /// <para>
 /// SOCKET — SOCK_STREAM, fixed 16-byte little-endian messages: uint32 type,
 /// then three uint32 payload fields a/b/c. Head to IDE: Hello (a = protocol
-/// version, b = head pid; sent once immediately after connect; the IDE closes
-/// the socket on version mismatch, which powers the head off) and FrameReady
-/// (a = sequence low 32, b = sequence high 32, c = slot index; advisory — the
-/// header is authoritative). IDE to head: TouchPress / TouchMove / TouchRelease
-/// (a = x, b = y in DEVICE pixels, c = pointer id, always 0 in v1). There is
-/// deliberately NO shutdown message: shutdown IS the socket closing.
+/// version, b = head pid, c = capability bits; sent once immediately after
+/// connect; the IDE closes the socket on version mismatch, which powers the
+/// head off) and FrameReady (a = sequence low 32, b = sequence high 32,
+/// c = slot index; advisory — the header is authoritative). IDE to head:
+/// TouchPress / TouchMove / TouchRelease (a = x, b = y in DEVICE pixels,
+/// c = pointer id — the IDE's single mouse-finger always sends 0; the head
+/// honors whatever id arrives, so multi-touch senders need no head change)
+/// and KeyDown / KeyUp (a = the WinUI VirtualKey, b = the X11-style hardware
+/// keycode = evdev scancode + 8, c = the Unicode codepoint for text input or
+/// 0 for none; the head tracks modifier state itself from the modifier keys'
+/// down/up, and V1 of the IDE sends no key messages at all — the capability
+/// ships dormant so enabling keyboard forwarding later is an IDE-only
+/// change). There is deliberately NO shutdown message: shutdown IS the socket
+/// closing.
 /// </para>
 /// </summary>
 internal static class FrameBufferEmulatorProtocol
@@ -92,6 +100,13 @@ internal static class FrameBufferEmulatorProtocol
     public const uint TouchPressMessage = 16;
     public const uint TouchMoveMessage = 17;
     public const uint TouchReleaseMessage = 18;
+    public const uint KeyDownMessage = 32;
+    public const uint KeyUpMessage = 33;
+
+    // Hello capability bits: what the connected head KNOWS HOW to consume, so
+    // a newer IDE can tailor what it offers without a head republish.
+    public const uint CapabilityKeyboard = 1u << 0;
+    public const uint CapabilityTouchPointIds = 1u << 1;
 
     // The launch-contract environment variable names.
     public const string ShmPathVariable = "CODEBRIX_FBEMU_SHM_PATH";

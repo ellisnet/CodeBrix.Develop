@@ -126,6 +126,47 @@ public class FrameBufferEmulatorSessionTests
     }
 
     [Fact]
+    public async Task The_heads_hello_capabilities_are_surfaced()
+    {
+        //Arrange
+        using var session = new FrameBufferEmulatorSession(Width, Height);
+        var connected = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        session.Connected += () => connected.TrySetResult();
+        using var app = await ConnectAsync(session);
+
+        //Act — a head declaring the dormant keyboard + touch-id capabilities.
+        SendMessage(app, FrameBufferEmulatorProtocol.HelloMessage,
+            FrameBufferEmulatorProtocol.Version, 12345,
+            FrameBufferEmulatorProtocol.CapabilityKeyboard
+                | FrameBufferEmulatorProtocol.CapabilityTouchPointIds);
+        await connected.Task.WaitAsync(EventTimeout, TestContext.Current.CancellationToken);
+
+        //Assert
+        (session.HeadCapabilities & FrameBufferEmulatorProtocol.CapabilityKeyboard).Should()
+            .Be(FrameBufferEmulatorProtocol.CapabilityKeyboard);
+        (session.HeadCapabilities & FrameBufferEmulatorProtocol.CapabilityTouchPointIds).Should()
+            .Be(FrameBufferEmulatorProtocol.CapabilityTouchPointIds);
+    }
+
+    [Fact]
+    public async Task Keys_reach_the_app_with_the_key_down_wire_shape()
+    {
+        //Arrange
+        using var session = new FrameBufferEmulatorSession(Width, Height);
+        using var app = await ConnectAndGreetAsync(session);
+
+        //Act — dormant in the IDE today, but the wire shape is shipped.
+        session.SendKey(pressed: true, virtualKey: 65, hardwareKeyCode: 38, unicodeCodepoint: 'a');
+
+        //Assert
+        var message = await ReceiveMessageAsync(app);
+        message.Type.Should().Be(FrameBufferEmulatorProtocol.KeyDownMessage);
+        message.A.Should().Be(65u);
+        message.B.Should().Be(38u);
+        message.C.Should().Be((uint) 'a');
+    }
+
+    [Fact]
     public async Task Touches_reach_the_app_over_the_socket_in_device_pixels()
     {
         //Arrange

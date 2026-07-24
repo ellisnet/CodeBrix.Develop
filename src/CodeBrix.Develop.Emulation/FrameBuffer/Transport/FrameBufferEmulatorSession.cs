@@ -69,6 +69,7 @@ public sealed class FrameBufferEmulatorSession : IFrameBufferFrameSource, IDispo
     volatile bool connected;
     volatile bool shutdownRequested;
     volatile bool disposed;
+    volatile uint headCapabilities;
 
     /// <summary>
     /// Raised (on a background thread) when the app has connected and passed
@@ -156,6 +157,14 @@ public sealed class FrameBufferEmulatorSession : IFrameBufferFrameSource, IDispo
     public bool IsConnected => connected;
 
     /// <summary>
+    /// The capability bits the connected head declared in its Hello (see
+    /// FrameBufferEmulatorProtocol.Capability*), 0 before the handshake. Lets
+    /// the IDE tailor what it offers — e.g. only forward keyboard input to a
+    /// head that declared <c>CapabilityKeyboard</c>.
+    /// </summary>
+    public uint HeadCapabilities => headCapabilities;
+
+    /// <summary>
     /// Sends one touch event to the app, in DEVICE pixels. Does nothing when
     /// no app is connected; a send failure is not an error here — the read
     /// loop notices the dead socket and raises <see cref="Disconnected"/>.
@@ -174,6 +183,38 @@ public sealed class FrameBufferEmulatorSession : IFrameBufferFrameSource, IDispo
         Span<byte> message = stackalloc byte[FrameBufferEmulatorProtocol.MessageSize];
         FrameBufferEmulatorProtocol.WriteMessage(message, type,
             (uint) Math.Max(0, x), (uint) Math.Max(0, y), 0);
+        lock (sendLock)
+        {
+            try
+            {
+                connection.Send(message);
+            }
+            catch (SocketException)
+            {
+            }
+            catch (ObjectDisposedException)
+            {
+            }
+        }
+    }
+
+    /// <summary>
+    /// Sends one key transition to the app: the WinUI virtual key, the
+    /// X11-style hardware keycode (evdev scancode + 8) and the Unicode
+    /// codepoint (0 for none). DORMANT in V1 — nothing in the IDE calls this
+    /// yet; it exists so that wiring the stored "Hardware keyboard support"
+    /// option up later is purely an IDE-side change (the shipped head already
+    /// consumes these messages and declares CapabilityKeyboard).
+    /// </summary>
+    public void SendKey(bool pressed, uint virtualKey, uint hardwareKeyCode, uint unicodeCodepoint)
+    {
+        if (disposed || !connected || client is not { } connection)
+            return;
+
+        Span<byte> message = stackalloc byte[FrameBufferEmulatorProtocol.MessageSize];
+        FrameBufferEmulatorProtocol.WriteMessage(message,
+            pressed ? FrameBufferEmulatorProtocol.KeyDownMessage : FrameBufferEmulatorProtocol.KeyUpMessage,
+            virtualKey, hardwareKeyCode, unicodeCodepoint);
         lock (sendLock)
         {
             try
@@ -354,7 +395,7 @@ public sealed class FrameBufferEmulatorSession : IFrameBufferFrameSource, IDispo
                 if (!await ReceiveExactlyAsync(connection, buffer, token).ConfigureAwait(false))
                     break; // end-of-file: the app went away
 
-                var (type, a, b, _) = FrameBufferEmulatorProtocol.ReadMessage(buffer);
+                var (type, a, b, c) = FrameBufferEmulatorProtocol.ReadMessage(buffer);
                 if (!sawHello)
                 {
                     if (type != FrameBufferEmulatorProtocol.HelloMessage
@@ -363,6 +404,7 @@ public sealed class FrameBufferEmulatorSession : IFrameBufferFrameSource, IDispo
                         break; // refuse: closing the socket powers the head off
                     }
                     sawHello = true;
+                    headCapabilities = c;
                     connected = true;
                     Connected?.Invoke();
                     continue;
