@@ -18,6 +18,7 @@ using CodeBrix.Develop.Core.Debugging;
 using CodeBrix.Develop.Core.Projects;
 using CodeBrix.Develop.Core.Testing;
 using CodeBrix.Develop.Core.TypeSystem;
+using CodeBrix.Develop.Emulation.FrameBuffer;
 using CodeBrix.Develop.Ide.Debugging;
 using CodeBrix.Develop.Ide.Gui.Dialogs;
 using CodeBrix.Develop.Ide.Gui.Documents;
@@ -63,9 +64,15 @@ public class Workbench
     CancellationTokenSource? testRunCancellation;
     bool testStatusRefreshQueued;
 
+    // Created on the first Run/Debug of a frame-buffer head and then left
+    // open — never hidden — so it keeps the place the user put it until they
+    // close it or the application exits.
+    FrameBufferEmulatorWindow? frameBufferEmulator;
+    bool frameBufferEmulationRunning;
+
     Gio.SimpleAction? buildAction, rebuildAction, cleanAction, runAction, stopAction, closeSolutionAction;
     Gio.SimpleAction? debugAction, stepOverAction, stepIntoAction, stepOutAction;
-    Gio.SimpleAction? updateCodeBrixPackagesAction;
+    Gio.SimpleAction? updateCodeBrixPackagesAction, closeEmulatorAction;
     Gio.SimpleAction? runAllTestsAction, runSelectedTestsAction, debugSelectedTestAction;
     Gio.SimpleAction? runTestAtCaretAction, debugTestAtCaretAction, rediscoverTestsAction;
 
@@ -199,6 +206,10 @@ public class Workbench
             DebugService.Shutdown(clearBreakpoints: false);
             documentManager.SaveAll();
             SaveUiState();
+            // The emulator is a window of this application: left open it would
+            // keep the process alive after the workbench is gone.
+            frameBufferEmulator?.Dispose();
+            frameBufferEmulator = null;
             return false;
         };
 
@@ -230,6 +241,7 @@ public class Workbench
         }
         IdePreferences.SolutionPanePosition.Value = horizontalSplit.Position;
         IdePreferences.OutputPanePosition.Value = verticalSplit.Position;
+        SaveFrameBufferEmulatorSize();
     }
 
     Gtk.Widget BuildToolbar()
@@ -322,6 +334,7 @@ public class Workbench
 
         AddAction("complete", () => documentManager.ActiveDocument?.ShowCompletion(), "<Control>space");
         updateCodeBrixPackagesAction = AddAction("update-codebrix-packages", () => _ = UpdateCodeBrixPackagesAsync(), null, enabled: false);
+        closeEmulatorAction = AddAction("close-emulator", () => frameBufferEmulator?.Close(), null, enabled: false);
         AddAction("about", ShowAbout);
 
         // The MonoDevelop convention: Ctrl+T runs every test in the solution.
@@ -400,6 +413,7 @@ public class Workbench
 
         var toolsMenu = Gio.Menu.New();
         toolsMenu.Append("_Update CodeBrix Package References", "app.update-codebrix-packages");
+        toolsMenu.Append("Close _Emulator", "app.close-emulator");
 
         var helpMenu = Gio.Menu.New();
         helpMenu.Append("_About CodeBrix Develop", "app.about");
@@ -955,7 +969,7 @@ public class Workbench
         testResultsPad.EndRun(summary);
         testsPad.RefreshStatuses();
         if (!DebugService.IsSessionActive)
-            stopAction?.SetEnabled(false);
+            DisableStopUnlessEmulating();
         SetTestActionsEnabled(IdeApp.CurrentSolution is { } solution && TestService.SolutionHasTests(solution));
         if (summary.BuildFailed || summary.Error.Length > 0)
         {
@@ -1043,9 +1057,80 @@ public class Workbench
             _ = DebugService.StopAsync();
         else if (TestService.IsRunning)
             testRunCancellation?.Cancel();
-        else
-            runCancellation?.Cancel();
+        else if (runCancellation != null)
+            runCancellation.Cancel();
+        else if (frameBufferEmulationRunning)
+        {
+            // The emulated application stops; its window stays exactly where
+            // it is (and, for now, looks no different — it is always black).
+            SetFrameBufferEmulationRunning(false);
+            ShowStatus("Frame Buffer emulation stopped");
+        }
     }
+
+    /// <summary>
+    /// Shows the frame-buffer emulator for the given head. A Linux Frame
+    /// Buffer head has no frame-buffer device to draw on inside a desktop
+    /// session, so Run and Debug deliberately build and launch nothing: they
+    /// open this window instead. Every other head builds and launches as
+    /// usual.
+    /// </summary>
+    void ShowFrameBufferEmulator(DotNetProject project)
+    {
+        if (frameBufferEmulator == null)
+        {
+            // The orientation and resolution are read HERE, when the window is
+            // created — an Options change applies to the next emulator window,
+            // not to one already open.
+            frameBufferEmulator = new FrameBufferEmulatorWindow(application,
+                IdePreferences.FrameBufferScreenOrientation.Value,
+                IdePreferences.FrameBufferScreenResolution.Value,
+                IdePreferences.FrameBufferWindowWidth, IdePreferences.FrameBufferWindowHeight);
+            frameBufferEmulator.Closed += (_, _) => OnFrameBufferEmulatorClosed();
+            closeEmulatorAction?.SetEnabled(true);
+        }
+
+        // Present raises an already-open window to the front without moving it.
+        frameBufferEmulator.Present($"{project.Name} — Frame Buffer");
+        SetFrameBufferEmulationRunning(true);
+
+        var orientation = frameBufferEmulator.Orientation;
+        ShowStatus("Frame Buffer emulation — " +
+            $"{frameBufferEmulator.Resolution.GetLabel(orientation)}, {orientation.GetLabel()}");
+    }
+
+    void OnFrameBufferEmulatorClosed()
+    {
+        SaveFrameBufferEmulatorSize();
+        frameBufferEmulator = null;
+        closeEmulatorAction?.SetEnabled(false);
+        SetFrameBufferEmulationRunning(false);
+        ShowStatus("Frame Buffer emulator closed");
+    }
+
+    // While the emulated application is "running", Stop is available and
+    // Run/Debug are not — the same shape as a launched head.
+    void SetFrameBufferEmulationRunning(bool running)
+    {
+        frameBufferEmulationRunning = running;
+        stopAction?.SetEnabled(running);
+        var canLaunch = !running && IdeApp.CurrentSolution != null;
+        runAction?.SetEnabled(canLaunch);
+        debugAction?.SetEnabled(canLaunch);
+    }
+
+    void SaveFrameBufferEmulatorSize()
+    {
+        if (frameBufferEmulator == null || !frameBufferEmulator.TryGetSize(out var width, out var height))
+            return;
+        IdePreferences.FrameBufferWindowWidth.Value = width;
+        IdePreferences.FrameBufferWindowHeight.Value = height;
+    }
+
+    // Stop stays available while the emulator is running even though no
+    // process is.
+    void DisableStopUnlessEmulating() =>
+        stopAction?.SetEnabled(frameBufferEmulationRunning);
 
     async Task DebugAsync()
     {
@@ -1061,6 +1146,13 @@ public class Workbench
             return;
         if (ResolveStartupProjectForLaunch(solution) is not { } project)
             return;
+
+        if (StartupHeadPolicy.IsFrameBufferHead(project.Name))
+        {
+            documentManager.SaveAll();
+            ShowFrameBufferEmulator(project);
+            return;
+        }
 
         documentManager.SaveAll();
         buildOutput.Clear();
@@ -1120,7 +1212,7 @@ public class Workbench
     void OnDebugEnded(int? exitCode)
     {
         OnDebugResumed();
-        stopAction?.SetEnabled(false);
+        DisableStopUnlessEmulating();
         ShowStatus(exitCode is { } code ? $"Debugging ended — exit code {code}" : "Debugging ended");
     }
 
@@ -1155,6 +1247,13 @@ public class Workbench
         if (ResolveStartupProjectForLaunch(solution) is not { } project)
             return;
 
+        if (StartupHeadPolicy.IsFrameBufferHead(project.Name))
+        {
+            documentManager.SaveAll();
+            ShowFrameBufferEmulator(project);
+            return;
+        }
+
         documentManager.SaveAll();
         applicationOutput.Clear();
         ShowBottomTab(applicationOutput.Widget);
@@ -1173,9 +1272,9 @@ public class Workbench
         }
         finally
         {
-            stopAction?.SetEnabled(false);
             runCancellation.Dispose();
             runCancellation = null;
+            DisableStopUnlessEmulating();
         }
     }
 
@@ -1232,7 +1331,9 @@ public class Workbench
         if (IdeApp.CurrentSolution == null)
             return;
         // Any live debug session dies with the solution, and per policy the
-        // breakpoints are lost too.
+        // breakpoints are lost too. Emulation belonged to a head in this
+        // solution, so it stops too — the window itself is left alone.
+        frameBufferEmulationRunning = false;
         DebugService.Shutdown(clearBreakpoints: true);
         documentManager.SaveAll();
         foreach (var document in documentManager.Documents.ToList())

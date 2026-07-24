@@ -73,5 +73,13 @@ public static class IdeOptionsSections
                     () => new BackupOptionsPanel()),
             },
         },
+        new OptionsSection("RunAndDebug", "Run and Debug")
+        {
+            Children =
+            {
+                new OptionsSection("FrameBuffer", "Frame Buffer", "prefs-debugger-16",
+                    () => new FrameBufferOptionsPanel()),
+            },
+        },
     };
 }

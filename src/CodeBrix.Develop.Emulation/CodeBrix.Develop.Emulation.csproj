@@ -1,0 +1,29 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <TargetFramework>net10.0</TargetFramework>
+    <!-- SITUATIONAL EXCEPTION (documented): this project keeps
+         <Nullable>enable</Nullable> because it builds directly against the
+         CodeBrix.Develop.UI binding (NRT-annotated API surface), the same
+         rationale as CodeBrix.Develop.Ide. CodeBrix.Develop.Core stays
+         NRT-off per family convention. -->
+    <Nullable>enable</Nullable>
+    <!-- The GObject subclass source generator shipped in the binding emits
+         unsafe code. -->
+    <AllowUnsafeBlocks>true</AllowUnsafeBlocks>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <PackageReference Include="CodeBrix.Develop.UI" Version="1.0.202.186" />
+    <!-- Pinned to the version CodeBrix.Platform builds against (SkiaSharpVersion
+         in its src/Directory.Build.targets), so the IDE and the emulated head
+         agree on Skia. -->
+    <PackageReference Include="SkiaSharp" Version="4.150.1" />
+    <PackageReference Include="SkiaSharp.NativeAssets.Linux" Version="4.150.1" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <ProjectReference Include="..\CodeBrix.Develop.Core\CodeBrix.Develop.Core.csproj" />
+  </ItemGroup>
+
+</Project>

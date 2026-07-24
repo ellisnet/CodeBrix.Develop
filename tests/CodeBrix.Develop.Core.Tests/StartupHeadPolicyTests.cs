@@ -33,6 +33,23 @@ public class StartupHeadPolicyTests
     }
 
     [Theory]
+    [InlineData("MyApp.LinuxFrameBuffer", true)]
+    [InlineData("LinuxFrameBuffer", true)]
+    [InlineData("MyApp.LinuxX11", false)]
+    [InlineData("MyApp.LinuxWayland", false)]
+    [InlineData("MyApp.Core", false)]
+    [InlineData("", false)]
+    [InlineData(null, false)]
+    public void Only_the_frame_buffer_head_is_emulated_instead_of_launched(string name, bool expected)
+    {
+        //Act
+        var result = StartupHeadPolicy.IsFrameBufferHead(name);
+
+        //Assert
+        result.Should().Be(expected);
+    }
+
+    [Theory]
     [InlineData("macos", "", "MacOS")]
     [InlineData("windows", "", "Win32Skia,WinWpfSkia")]
     [InlineData("linux", "x11", "LinuxX11,LinuxFrameBuffer")]

@@ -34,6 +34,7 @@
 
   <ItemGroup>
     <ProjectReference Include="..\CodeBrix.Develop.Core\CodeBrix.Develop.Core.csproj" />
+    <ProjectReference Include="..\CodeBrix.Develop.Emulation\CodeBrix.Develop.Emulation.csproj" />
   </ItemGroup>
 
 </Project>

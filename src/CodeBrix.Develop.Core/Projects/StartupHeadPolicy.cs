@@ -20,10 +20,18 @@ namespace CodeBrix.Develop.Core.Projects;
 /// </summary>
 public static class StartupHeadPolicy
 {
+    /// <summary>
+    /// The head kind of the Linux frame-buffer head. It is the one head the
+    /// IDE does not build and launch: with no frame-buffer device to draw on
+    /// inside a desktop session, Run and Debug open the frame-buffer emulator
+    /// window instead.
+    /// </summary>
+    public const string LinuxFrameBufferKind = "LinuxFrameBuffer";
+
     /// <summary>The recognized platform head kinds, in canonical order.</summary>
     public static readonly IReadOnlyList<string> AllHeadKinds = new[]
     {
-        "MacOS", "LinuxX11", "LinuxWayland", "LinuxFrameBuffer", "Win32Skia", "WinWpfSkia",
+        "MacOS", "LinuxX11", "LinuxWayland", LinuxFrameBufferKind, "Win32Skia", "WinWpfSkia",
     };
 
     /// <summary>
@@ -44,6 +52,13 @@ public static class StartupHeadPolicy
 
     /// <summary>Whether the given project name is a recognized platform head.</summary>
     public static bool IsHead(string projectName) => GetHeadKind(projectName) != null;
+
+    /// <summary>
+    /// Whether the given project name is the Linux frame-buffer head, which
+    /// Run and Debug emulate rather than build and launch.
+    /// </summary>
+    public static bool IsFrameBufferHead(string projectName) =>
+        GetHeadKind(projectName) == LinuxFrameBufferKind;
 
     /// <summary>
     /// The head kinds that can run on — and so may be manually set as the

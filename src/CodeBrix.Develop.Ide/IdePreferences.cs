@@ -8,6 +8,7 @@
 //
 
 using CodeBrix.Develop.Core.Options;
+using CodeBrix.Develop.Emulation.FrameBuffer;
 
 namespace CodeBrix.Develop.Ide;
 
@@ -82,4 +83,45 @@ public static class IdePreferences
     /// <summary>The id of the Options page shown when the dialog last closed.</summary>
     public static readonly ConfigurationProperty<string> OptionsLastPage =
         ConfigurationProperty.Create("CodeBrix.Develop.Ide.OptionsDialog.LastPage", "");
+
+    /// <summary>
+    /// How the emulated frame-buffer device is held. Stored by name, so the
+    /// enum's members must not be renamed.
+    /// </summary>
+    public static readonly ConfigurationProperty<FrameBufferOrientation> FrameBufferScreenOrientation =
+        ConfigurationProperty.Create("CodeBrix.Develop.Ide.FrameBuffer.Orientation",
+            FrameBufferOrientation.Portrait);
+
+    /// <summary>
+    /// The screen the emulated frame-buffer device has, as a size class plus
+    /// its portrait dimensions. Stored by name, so the enum's members must
+    /// not be renamed.
+    /// </summary>
+    public static readonly ConfigurationProperty<FrameBufferResolution> FrameBufferScreenResolution =
+        ConfigurationProperty.Create("CodeBrix.Develop.Ide.FrameBuffer.Resolution",
+            FrameBufferResolution.SevenInch720x1280);
+
+    /// <summary>
+    /// Whether the emulated frame-buffer device has a hardware keyboard.
+    /// Stored only — nothing reads it yet.
+    /// </summary>
+    public static readonly ConfigurationProperty<bool> FrameBufferHardwareKeyboard =
+        ConfigurationProperty.Create("CodeBrix.Develop.Ide.FrameBuffer.HardwareKeyboard", false);
+
+    /// <summary>
+    /// The remembered width of the frame-buffer emulator's screen area (the
+    /// window is this plus its bezel); 0 until it has been shown once. Its
+    /// POSITION is deliberately absent: GTK 4 has no window-positioning API,
+    /// so a window's place on screen can neither be read nor restored (which
+    /// also means a remembered emulator can never come back off-screen).
+    /// </summary>
+    public static readonly ConfigurationProperty<int> FrameBufferWindowWidth =
+        ConfigurationProperty.Create("CodeBrix.Develop.Ide.FrameBuffer.Window.Width", 0);
+
+    /// <summary>
+    /// The remembered height of the frame-buffer emulator's screen area;
+    /// 0 until it has been shown once.
+    /// </summary>
+    public static readonly ConfigurationProperty<int> FrameBufferWindowHeight =
+        ConfigurationProperty.Create("CodeBrix.Develop.Ide.FrameBuffer.Window.Height", 0);
 }

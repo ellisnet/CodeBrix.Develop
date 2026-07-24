@@ -7,8 +7,10 @@
   </Folder>
   <Folder Name="/Tests/">
     <Project Path="tests/CodeBrix.Develop.Core.Tests/CodeBrix.Develop.Core.Tests.csproj" />
+    <Project Path="tests/CodeBrix.Develop.Emulation.Tests/CodeBrix.Develop.Emulation.Tests.csproj" />
   </Folder>
   <Project Path="src/CodeBrix.Develop.Core/CodeBrix.Develop.Core.csproj" />
+  <Project Path="src/CodeBrix.Develop.Emulation/CodeBrix.Develop.Emulation.csproj" />
   <Project Path="src/CodeBrix.Develop.Ide/CodeBrix.Develop.Ide.csproj" />
   <Project Path="src/CodeBrix.Develop/CodeBrix.Develop.csproj" />
 </Solution>
