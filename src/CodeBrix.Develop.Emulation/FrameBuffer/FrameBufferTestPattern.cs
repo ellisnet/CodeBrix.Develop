@@ -138,6 +138,21 @@ internal sealed class FrameBufferTestPattern : IDisposable
 
     void OnDraw(Gtk.DrawingArea area, Cairo.Context cr, int width, int height)
     {
+        // See FrameBufferScreen.OnDraw: the draw-func handler's reference on
+        // the frame's cairo_t must be released deterministically, or this
+        // continuously-ticking surface leaks native memory at frame rate.
+        try
+        {
+            OnDrawCore(cr, width, height);
+        }
+        finally
+        {
+            cr.Dispose();
+        }
+    }
+
+    void OnDrawCore(Cairo.Context cr, int width, int height)
+    {
         if (disposed || width <= 0 || height <= 0)
             return;
 

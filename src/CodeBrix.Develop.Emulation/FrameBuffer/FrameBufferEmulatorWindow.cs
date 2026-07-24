@@ -148,6 +148,10 @@ public sealed class FrameBufferEmulatorWindow : IDisposable
 
         window = Gtk.Window.New();
         application.AddWindow(window);
+        // Exit-path breadcrumb (see the workbench window's twin): records
+        // whether and when this window is torn down outside Close().
+        window.OnDestroy += (_, _) =>
+            Core.LoggingService.LogInfo("Frame Buffer emulator window destroyed");
         window.SetTitle("Frame Buffer");
         EnsureCssInstalled();
 

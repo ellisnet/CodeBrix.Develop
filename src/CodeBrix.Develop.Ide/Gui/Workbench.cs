@@ -92,6 +92,10 @@ public class Workbench
             ?? throw new InvalidOperationException("The workbench must be created on the GTK main loop with a GLib synchronization context");
 
         window = Gtk.ApplicationWindow.New(app);
+        // Exit-path breadcrumb: a GtkApplication quits its main loop when its
+        // last window is destroyed, so an unexpected quiet exit's teardown
+        // order is the fingerprint of what initiated it.
+        window.OnDestroy += (_, _) => LoggingService.LogInfo("Workbench window destroyed");
         window.Title = "CodeBrix Develop";
         window.SetDefaultSize(IdePreferences.WorkbenchWidth, IdePreferences.WorkbenchHeight);
         if (IdePreferences.WorkbenchMaximized)
@@ -324,6 +328,7 @@ public class Workbench
         AddAction("options", ShowOptions, "<Control>comma");
         AddAction("quit", () =>
         {
+            LoggingService.LogInfo("Quit action invoked (File > Quit / Ctrl+Q)");
             DebugService.Shutdown(clearBreakpoints: false);
             documentManager.SaveAll();
             SaveUiState();

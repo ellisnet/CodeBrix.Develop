@@ -74,12 +74,15 @@ internal sealed class FrameBufferScreen : IDisposable
         screen.SetDrawFunc(OnDraw);
         InstallInput(screen);
 
-        // Drive a continuous redraw; each draw polls the frame source, so this
-        // is also the frame-consumption tick. Deliberately decoupled from the
-        // app's own render pacing.
+        // Drive a continuous redraw WHILE AN APP IS ATTACHED; each draw polls
+        // the frame source, so this is also the frame-consumption tick,
+        // deliberately decoupled from the app's own render pacing. With no
+        // source the screen is a static black — powered off — and repainting
+        // it would be pure waste (GTK still repaints it on resize by itself).
         screen.AddTickCallback((widget, _) =>
         {
-            widget.QueueDraw();
+            if (frameSource != null)
+                widget.QueueDraw();
             return true;
         });
     }
@@ -151,35 +154,48 @@ internal sealed class FrameBufferScreen : IDisposable
 
     void OnDraw(Gtk.DrawingArea area, Cairo.Context cr, int width, int height)
     {
-        if (disposed || width <= 0 || height <= 0)
-            return;
-
-        EnsurePresentSurface(width, height);
-        if (presentSurface == null || presentSkia == null)
-            return;
-
-        // Pull the newest complete frame, if one arrived since last tick.
-        if (frameSource is { } source
-            && source.TryCopyLatestFrame(deviceBitmap.GetPixels(), deviceFrameBytes, ref lastSequence))
+        // The finally-Dispose is LOAD-BEARING: the binding's draw-func handler
+        // takes its own reference on the frame's cairo_t (a GBoxed copy) and
+        // otherwise releases it only at FINALIZATION. Each frame context pins
+        // megabytes of render-target state, and this draw runs at frame-clock
+        // rate — undisposed, the process grows by hundreds of MB/s of native
+        // memory the GC cannot see, until the kernel OOM-kills the IDE.
+        try
         {
-            hasFrame = true;
-        }
+            if (disposed || width <= 0 || height <= 0)
+                return;
 
-        // Cairo's contract for writing to a surface's pixels behind its back:
-        // flush BEFORE touching them and mark dirty AFTER.
-        presentSurface.Flush();
-        var canvas = presentSkia.Canvas;
-        canvas.Clear(SKColors.Black);
-        if (hasFrame)
-        {
-            using var frame = SKImage.FromPixels(deviceInfo, deviceBitmap.GetPixels(), deviceBitmap.RowBytes);
-            canvas.DrawImage(frame, SKRect.Create(0, 0, width, height),
-                new SKSamplingOptions(SKFilterMode.Linear, SKMipmapMode.None));
+            EnsurePresentSurface(width, height);
+            if (presentSurface == null || presentSkia == null)
+                return;
+
+            // Pull the newest complete frame, if one arrived since last tick.
+            if (frameSource is { } source
+                && source.TryCopyLatestFrame(deviceBitmap.GetPixels(), deviceFrameBytes, ref lastSequence))
+            {
+                hasFrame = true;
+            }
+
+            // Cairo's contract for writing to a surface's pixels behind its back:
+            // flush BEFORE touching them and mark dirty AFTER.
+            presentSurface.Flush();
+            var canvas = presentSkia.Canvas;
+            canvas.Clear(SKColors.Black);
+            if (hasFrame)
+            {
+                using var frame = SKImage.FromPixels(deviceInfo, deviceBitmap.GetPixels(), deviceBitmap.RowBytes);
+                canvas.DrawImage(frame, SKRect.Create(0, 0, width, height),
+                    new SKSamplingOptions(SKFilterMode.Linear, SKMipmapMode.None));
+            }
+            canvas.Flush();
+            presentSurface.MarkDirty();
+            cr.SetSourceSurface(presentSurface, 0, 0);
+            cr.Paint();
         }
-        canvas.Flush();
-        presentSurface.MarkDirty();
-        cr.SetSourceSurface(presentSurface, 0, 0);
-        cr.Paint();
+        finally
+        {
+            cr.Dispose();
+        }
     }
 
     void EnsurePresentSurface(int width, int height)

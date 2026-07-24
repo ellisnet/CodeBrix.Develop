@@ -94,8 +94,16 @@ static class Program
                 _ = IdeApp.Workbench!.RestoreStartupSolutionAsync();
         };
 
+        // Breadcrumbs for exit-path diagnosis: a clean quit is otherwise
+        // completely silent (the loop returns, Main returns, nothing logs),
+        // which makes an UNEXPECTED quiet exit impossible to tell apart from
+        // a deliberate one.
+        AppDomain.CurrentDomain.ProcessExit += (_, _) =>
+            LoggingService.LogInfo("CodeBrix Develop process exiting");
+
         LoggingService.LogInfo("CodeBrix Develop starting");
         var exitCode = application.RunWithSynchronizationContext(null);
+        LoggingService.LogInfo($"CodeBrix Develop GTK main loop exited (code {exitCode})");
 
         // A restart request (e.g. to adopt an imported options file) is
         // honored only after the GTK main loop — and with it every handle on
