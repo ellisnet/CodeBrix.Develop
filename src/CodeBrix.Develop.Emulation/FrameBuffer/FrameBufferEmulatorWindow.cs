@@ -96,8 +96,12 @@ public sealed class FrameBufferEmulatorWindow : IDisposable
     int settledTicks;
     bool disposed;
 
-    // The screen's content until an emulated application is driving it.
-    readonly FrameBufferTestPattern testPattern;
+    // The screen's content: the live screen displays an emulated application's
+    // frames (black until one is attached — a device with no power). Setting
+    // CODEBRIX_DEVELOP_FBEMU_TEST_PATTERN=1 shows the diagnostic test pattern
+    // instead, for telling a transport regression from a display-path one.
+    readonly FrameBufferScreen? liveScreen;
+    readonly FrameBufferTestPattern? testPattern;
 
     /// <summary>
     /// Raised when the window is closing, from Tools ▸ Close Emulator or from
@@ -106,6 +110,26 @@ public sealed class FrameBufferEmulatorWindow : IDisposable
     /// caller must drop its reference.
     /// </summary>
     public event EventHandler? Closed;
+
+    /// <summary>
+    /// Raised on the GTK main thread for each touch on the emulated screen, in
+    /// DEVICE pixels: press (left button down — the finger touched the
+    /// screen), move (only while pressed), release (the finger lifted). Not
+    /// raised in test-pattern diagnostic mode.
+    /// </summary>
+    public event Action<FrameBufferTouchKind, int, int>? Touch;
+
+    /// <summary>
+    /// Attaches a running emulated application's frames to the screen, or
+    /// detaches with null — power off, which blanks the screen. The window
+    /// polls the source from its draw tick on the GTK main thread; detach
+    /// BEFORE disposing the source. GTK main thread only.
+    /// </summary>
+    public void SetFrameSource(IFrameBufferFrameSource? source)
+    {
+        ObjectDisposedException.ThrowIf(disposed, this);
+        liveScreen?.SetFrameSource(source);
+    }
 
     /// <summary>
     /// Creates the emulator window for the given application, proportioned to
@@ -165,10 +189,20 @@ public sealed class FrameBufferEmulatorWindow : IDisposable
         bezel.SetChild(screenFrame);
         window.SetChild(bezel);
 
-        // Draws the no-signal screen at the device's exact resolution; the
-        // emulated application's frames will take this same display path.
-        testPattern = new FrameBufferTestPattern(screen,
-            this.resolution.GetWidth(orientation), this.resolution.GetHeight(orientation));
+        // The screen content, at the device's exact resolution. The live
+        // screen shows the emulated application's frames; the test pattern is
+        // its diagnostic stand-in, drawn through the same display path.
+        var deviceWidth = this.resolution.GetWidth(orientation);
+        var deviceHeight = this.resolution.GetHeight(orientation);
+        if (Environment.GetEnvironmentVariable("CODEBRIX_DEVELOP_FBEMU_TEST_PATTERN") == "1")
+        {
+            testPattern = new FrameBufferTestPattern(screen, deviceWidth, deviceHeight);
+        }
+        else
+        {
+            liveScreen = new FrameBufferScreen(screen, deviceWidth, deviceHeight);
+            liveScreen.Touch += (kind, x, y) => Touch?.Invoke(kind, x, y);
+        }
 
         // Closing really closes — the window's place on screen goes with it,
         // which is the trade the user makes by closing rather than stopping.
@@ -244,7 +278,8 @@ public sealed class FrameBufferEmulatorWindow : IDisposable
             return;
         disposed = true;
         StopWatchingForSettledResize();
-        testPattern.Dispose();
+        liveScreen?.Dispose();
+        testPattern?.Dispose();
         window.Destroy();
     }
 

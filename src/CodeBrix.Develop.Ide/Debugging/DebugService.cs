@@ -80,7 +80,8 @@ public static class DebugService
     /// test filter is "debug this test" (breakpoints, stepping, and hover
     /// evaluation inside test code all work unchanged).
     /// </summary>
-    public static async Task StartAsync(DotNetProject project, IReadOnlyList<string>? programArguments = null)
+    public static async Task StartAsync(DotNetProject project, IReadOnlyList<string>? programArguments = null,
+        IReadOnlyDictionary<string, string>? environment = null)
     {
         lock (gate)
         {
@@ -97,7 +98,7 @@ public static class DebugService
 
         var newSession = await DebugSession.LaunchAsync(
             DebugSession.DefaultDebuggerPath, program, project.BaseDirectory, breakpointsByFile,
-            programArguments).ConfigureAwait(false);
+            programArguments, environment).ConfigureAwait(false);
 
         newSession.Stopped += (reason, threadId) => _ = OnStoppedAsync(newSession, reason);
         newSession.Resumed += () =>

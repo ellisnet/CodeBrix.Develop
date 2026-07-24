@@ -212,7 +212,7 @@ public class DotNetProject
     {
         try
         {
-            var properties = await EvaluateOutputPropertiesAsync(configuration, cancellationToken).ConfigureAwait(false);
+            var properties = await EvaluatePropertiesAsync(configuration, cancellationToken, "RunCommand", "TargetPath").ConfigureAwait(false);
             if (properties.TryGetValue("RunCommand", out var runCommand) && File.Exists(runCommand))
                 return new FilePath(runCommand);
             if (properties.TryGetValue("TargetPath", out var targetPath) && !string.IsNullOrEmpty(targetPath))
@@ -225,9 +225,14 @@ public class DotNetProject
         return GetOutputExecutable(configuration);
     }
 
-    // Evaluates the project (no build) with "dotnet msbuild -getProperty:",
-    // returning the requested properties from the JSON it prints.
-    async Task<Dictionary<string, string>> EvaluateOutputPropertiesAsync(string configuration, CancellationToken cancellationToken)
+    /// <summary>
+    /// Evaluates the project (no build) with "dotnet msbuild -getProperty:",
+    /// returning the requested properties. A property the evaluation leaves
+    /// empty comes back as an empty string. Note MSBuild's output shape
+    /// differs by arity: ONE property prints its raw value; two or more print
+    /// a JSON object — both are handled here.
+    /// </summary>
+    public async Task<Dictionary<string, string>> EvaluatePropertiesAsync(string configuration, CancellationToken cancellationToken, params string[] propertyNames)
     {
         var startInfo = new ProcessStartInfo("dotnet")
         {
@@ -245,7 +250,7 @@ public class DotNetProject
         // first framework, matching what GetOutputExecutable assumes.
         if (TargetFrameworks.Count > 1)
             startInfo.ArgumentList.Add($"-property:TargetFramework={TargetFrameworks[0]}");
-        startInfo.ArgumentList.Add("-getProperty:RunCommand,TargetPath");
+        startInfo.ArgumentList.Add($"-getProperty:{string.Join(',', propertyNames)}");
 
         using var process = new Process { StartInfo = startInfo };
         if (!process.Start())
@@ -275,6 +280,12 @@ public class DotNetProject
         }
 
         var result = new Dictionary<string, string>(StringComparer.Ordinal);
+        if (propertyNames.Length == 1)
+        {
+            // A single -getProperty prints the raw evaluated value, no JSON.
+            result[propertyNames[0]] = output.TrimEnd('\r', '\n');
+            return result;
+        }
         using var document = JsonDocument.Parse(output);
         if (document.RootElement.TryGetProperty("Properties", out var table) && table.ValueKind == JsonValueKind.Object)
         {

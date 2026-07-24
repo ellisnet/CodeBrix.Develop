@@ -31,6 +31,14 @@ public class BuildService
     public Task<BuildResult> BuildAsync(FilePath target, CancellationToken cancellationToken = default)
         => RunBuildVerbAsync("build", target, cancellationToken);
 
+    /// <summary>
+    /// Runs "dotnet build" with extra command-line arguments — the seam the
+    /// frame-buffer emulator uses to inject its head-swap MSBuild property
+    /// without ever touching the user's project files.
+    /// </summary>
+    public Task<BuildResult> BuildAsync(FilePath target, CancellationToken cancellationToken, params string[] extraArguments)
+        => RunBuildVerbAsync("build", target, cancellationToken, extraArguments);
+
     /// <summary>Runs "dotnet clean" against the given solution or project file.</summary>
     public Task<BuildResult> CleanAsync(FilePath target, CancellationToken cancellationToken = default)
         => RunBuildVerbAsync("clean", target, cancellationToken);
@@ -108,6 +116,36 @@ public class BuildService
 
         OutputReceived?.Invoke($"dotnet run --project {project.FileName}");
         var exitCode = await RunProcessAsync(startInfo, line => OutputReceived?.Invoke(line), cancellationToken).ConfigureAwait(false);
+        OutputReceived?.Invoke($"The application exited with code {exitCode}.");
+        return exitCode;
+    }
+
+    /// <summary>
+    /// Starts an already-built executable directly — no dotnet CLI in between —
+    /// with extra environment variables, streaming its output. The
+    /// cancellation token is a HARD KILL (the whole process tree); callers
+    /// wanting a graceful stop first (the frame-buffer emulator closes its
+    /// socket and lets the app power itself off) cancel this token only as
+    /// their backstop. Returns the exit code when the application terminates.
+    /// </summary>
+    public async Task<int> RunExecutableAsync(FilePath executable, FilePath workingDirectory,
+        IReadOnlyDictionary<string, string> environment, CancellationToken killToken = default)
+    {
+        var startInfo = new ProcessStartInfo(executable)
+        {
+            WorkingDirectory = workingDirectory,
+            RedirectStandardOutput = true,
+            RedirectStandardError = true,
+            UseShellExecute = false,
+        };
+        if (environment != null)
+        {
+            foreach (var pair in environment)
+                startInfo.EnvironmentVariables[pair.Key] = pair.Value;
+        }
+
+        OutputReceived?.Invoke($"{executable}");
+        var exitCode = await RunProcessAsync(startInfo, line => OutputReceived?.Invoke(line), killToken).ConfigureAwait(false);
         OutputReceived?.Invoke($"The application exited with code {exitCode}.");
         return exitCode;
     }

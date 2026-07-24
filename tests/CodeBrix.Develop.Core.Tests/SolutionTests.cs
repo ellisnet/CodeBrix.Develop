@@ -353,6 +353,52 @@ public class DotNetProjectTests : IDisposable
     }
 
     [Fact]
+    public async Task A_single_property_evaluation_reads_msbuilds_raw_output()
+    {
+        //Arrange — MSBuild prints a single -getProperty as a RAW value, no
+        //JSON envelope; the JSON only appears from two properties up. This is
+        //the regression test for the frame-buffer swap generator's
+        //CustomAfterMicrosoftCommonTargets probe, which asks for exactly one.
+        var project = WriteProbeProject();
+
+        //Act
+        var properties = await project.EvaluatePropertiesAsync(
+            "Debug", TestContext.Current.CancellationToken, "CodeBrixProbeValue");
+
+        //Assert
+        properties["CodeBrixProbeValue"].Should().Be("from-the-project");
+    }
+
+    [Fact]
+    public async Task A_multi_property_evaluation_reads_msbuilds_json_output()
+    {
+        //Arrange
+        var project = WriteProbeProject();
+
+        //Act
+        var properties = await project.EvaluatePropertiesAsync(
+            "Debug", TestContext.Current.CancellationToken, "CodeBrixProbeValue", "Configuration");
+
+        //Assert
+        properties["CodeBrixProbeValue"].Should().Be("from-the-project");
+        properties["Configuration"].Should().Be("Debug");
+    }
+
+    DotNetProject WriteProbeProject()
+    {
+        var csprojPath = Path.Combine(tempDirectory, "Probe.csproj");
+        File.WriteAllText(csprojPath, """
+            <Project Sdk="Microsoft.NET.Sdk">
+              <PropertyGroup>
+                <TargetFramework>net10.0</TargetFramework>
+                <CodeBrixProbeValue>from-the-project</CodeBrixProbeValue>
+              </PropertyGroup>
+            </Project>
+            """);
+        return DotNetProject.Load(csprojPath);
+    }
+
+    [Fact]
     public void Load_reads_linked_files_and_declared_folders()
     {
         //Arrange — Link both as attribute and as child element, plus a

@@ -193,7 +193,8 @@ internal sealed class FrameBufferTestPattern : IDisposable
         presentSkia = SKSurface.Create(info, GetPixelPointer(presentSurface), presentSurface.Stride);
     }
 
-    static IntPtr GetPixelPointer(Cairo.ImageSurface surface)
+    // Shared with FrameBufferScreen, which reuses this exact present path.
+    internal static IntPtr GetPixelPointer(Cairo.ImageSurface surface)
     {
         var data = surface.GetData();
         unsafe

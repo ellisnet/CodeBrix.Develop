@@ -90,7 +90,8 @@ public class DebugSession : IDisposable
     /// </summary>
     public static async Task<DebugSession> LaunchAsync(string debuggerPath, string program, string workingDirectory,
         IReadOnlyDictionary<string, IReadOnlyList<int>> breakpointsByFile,
-        IReadOnlyList<string> programArguments = null, CancellationToken cancellationToken = default)
+        IReadOnlyList<string> programArguments = null,
+        IReadOnlyDictionary<string, string> environment = null, CancellationToken cancellationToken = default)
     {
         if (!File.Exists(debuggerPath))
             throw new FileNotFoundException("The debugger binary was not found; is the CodeBrix.Develop.Debug package present?", debuggerPath);
@@ -140,18 +141,24 @@ public class DebugSession : IDisposable
             // The launch response only arrives after configurationDone, so
             // run the request concurrently and complete configuration when
             // the adapter signals "initialized".
-            var launchTask = session.client.SendRequestAsync("launch", new
+            var launchArguments = new Dictionary<string, object>
             {
-                name = ".NET Core Launch",
-                type = "coreclr",
-                request = "launch",
-                program,
-                args = programArguments ?? Array.Empty<string>(),
-                cwd = workingDirectory,
-                console = "internalConsole",
-                stopAtEntry = false,
-                justMyCode = true,
-            }, cancellationToken);
+                ["name"] = ".NET Core Launch",
+                ["type"] = "coreclr",
+                ["request"] = "launch",
+                ["program"] = program,
+                ["args"] = programArguments ?? Array.Empty<string>(),
+                ["cwd"] = workingDirectory,
+                ["console"] = "internalConsole",
+                ["stopAtEntry"] = false,
+                ["justMyCode"] = true,
+            };
+            // Extra environment for the debuggee (netcoredbg honors the DAP
+            // "env" member) — how the frame-buffer emulator hands its
+            // transport paths to an app launched under the debugger.
+            if (environment != null)
+                launchArguments["env"] = environment;
+            var launchTask = session.client.SendRequestAsync("launch", launchArguments, cancellationToken);
 
             await initialized.Task.WaitAsync(TimeSpan.FromSeconds(30), cancellationToken).ConfigureAwait(false);
 

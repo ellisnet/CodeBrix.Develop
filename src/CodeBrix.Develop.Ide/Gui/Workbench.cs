@@ -19,6 +19,7 @@ using CodeBrix.Develop.Core.Projects;
 using CodeBrix.Develop.Core.Testing;
 using CodeBrix.Develop.Core.TypeSystem;
 using CodeBrix.Develop.Emulation.FrameBuffer;
+using CodeBrix.Develop.Emulation.FrameBuffer.Transport;
 using CodeBrix.Develop.Ide.Debugging;
 using CodeBrix.Develop.Ide.Gui.Dialogs;
 using CodeBrix.Develop.Ide.Gui.Documents;
@@ -69,6 +70,11 @@ public class Workbench
     // close it or the application exits.
     FrameBufferEmulatorWindow? frameBufferEmulator;
     bool frameBufferEmulationRunning;
+
+    // The transport of the emulated app currently running (or being debugged);
+    // null between launches. The window's Touch handler reads this field, so
+    // touch forwarding follows whichever session is live.
+    FrameBufferEmulatorSession? frameBufferSession;
 
     Gio.SimpleAction? buildAction, rebuildAction, cleanAction, runAction, stopAction, closeSolutionAction;
     Gio.SimpleAction? debugAction, stepOverAction, stepIntoAction, stepOutAction;
@@ -206,8 +212,13 @@ public class Workbench
             DebugService.Shutdown(clearBreakpoints: false);
             documentManager.SaveAll();
             SaveUiState();
+            // Loss of power for any emulated app still running: cancelling
+            // the run pulls its socket (the head hard-exits on end-of-file).
+            runCancellation?.Cancel();
+            frameBufferSession?.Shutdown();
             // The emulator is a window of this application: left open it would
             // keep the process alive after the workbench is gone.
+            frameBufferEmulator?.SetFrameSource(null);
             frameBufferEmulator?.Dispose();
             frameBufferEmulator = null;
             return false;
@@ -1087,6 +1098,9 @@ public class Workbench
                 IdePreferences.FrameBufferScreenResolution.Value,
                 IdePreferences.FrameBufferWindowWidth, IdePreferences.FrameBufferWindowHeight);
             frameBufferEmulator.Closed += (_, _) => OnFrameBufferEmulatorClosed();
+            // Touches (device pixels) go to whatever app is currently live;
+            // with no session the finger presses a powered-off screen.
+            frameBufferEmulator.Touch += (kind, x, y) => frameBufferSession?.SendTouch(kind, x, y);
             closeEmulatorAction?.SetEnabled(true);
         }
 
@@ -1099,11 +1113,159 @@ public class Workbench
             $"{frameBufferEmulator.Resolution.GetLabel(orientation)}, {orientation.GetLabel()}");
     }
 
+    /// <summary>
+    /// The shared front half of an emulated Run/Debug: saves, shows the
+    /// emulator window, verifies the head can be swapped, and builds against
+    /// the emulated head package. Returns the emulated device's resolution —
+    /// the one the EXISTING window was built with, never what Options
+    /// currently says — or null when emulation could not start (the status
+    /// and output already say why).
+    /// </summary>
+    async Task<(int Width, int Height)?> PrepareFrameBufferLaunchAsync(DotNetProject project, CancellationToken cancellationToken)
+    {
+        documentManager.SaveAll();
+        ShowFrameBufferEmulator(project);
+        if (frameBufferEmulator == null)
+            return null;
+
+        if (!FrameBufferHeadSwap.CanSwap(project))
+        {
+            applicationOutput.Clear();
+            ShowBottomTab(applicationOutput.Widget);
+            applicationOutput.AppendLine(
+                $"{project.Name} does not reference {FrameBufferHeadSwap.FrameBufferPackageId}, " +
+                "so it cannot be built against the emulated frame-buffer head.");
+            SetFrameBufferEmulationRunning(false);
+            ShowStatus("Frame Buffer emulation could not start");
+            return null;
+        }
+
+        // Resolution lockstep: the app is launched at the resolution this
+        // window was created with; changing Options means closing the
+        // emulator and running again.
+        var deviceWidth = frameBufferEmulator.Resolution.GetWidth(frameBufferEmulator.Orientation);
+        var deviceHeight = frameBufferEmulator.Resolution.GetHeight(frameBufferEmulator.Orientation);
+
+        buildOutput.Clear();
+        ShowBottomTab(buildOutput.Widget);
+        ShowStatus($"Building {project.Name} for the Frame Buffer emulator…");
+        var swapArgument = await FrameBufferHeadSwap.CreateSwapArgumentAsync(project, cancellationToken);
+        var result = await buildService.BuildAsync(project.FileName, cancellationToken, swapArgument);
+        if (!result.Success)
+        {
+            ShowStatus(cancellationToken.IsCancellationRequested ? "Build canceled" : "Build failed");
+            SetFrameBufferEmulationRunning(false);
+            return null;
+        }
+        return (deviceWidth, deviceHeight);
+    }
+
+    async Task RunFrameBufferEmulatedAsync(DotNetProject project)
+    {
+        FrameBufferEmulatorSession? session = null;
+        runCancellation = new CancellationTokenSource();
+        try
+        {
+            if (await PrepareFrameBufferLaunchAsync(project, runCancellation.Token) is not { } device)
+                return;
+
+            var executable = await project.GetOutputExecutableAsync(cancellationToken: runCancellation.Token);
+            applicationOutput.Clear();
+            ShowBottomTab(applicationOutput.Widget);
+            ShowStatus($"Running {project.Name} in the Frame Buffer emulator…");
+
+            session = new FrameBufferEmulatorSession(device.Width, device.Height);
+            frameBufferSession = session;
+            frameBufferEmulator!.SetFrameSource(session);
+
+            using var killCts = new CancellationTokenSource();
+            var capturedSession = session;
+            using var stopRegistration = runCancellation.Token.Register(() =>
+            {
+                // Stop is loss of power: closing the socket makes the head
+                // hard-exit on end-of-file; the SIGKILL backstop covers an
+                // app that somehow survives the unplugging.
+                capturedSession.Shutdown();
+                killCts.CancelAfter(TimeSpan.FromSeconds(1));
+            });
+
+            var exitCode = await runService.RunExecutableAsync(executable, project.BaseDirectory,
+                session.EnvironmentVariables, killCts.Token);
+            ShowStatus(runCancellation.IsCancellationRequested
+                ? "Frame Buffer emulation stopped"
+                : $"{project.Name} exited with code {exitCode} — the emulated device powered off");
+        }
+        catch (Exception ex)
+        {
+            LoggingService.LogError("Frame Buffer emulation failed", ex);
+            ShowStatus($"Frame Buffer emulation failed: {ex.Message}");
+        }
+        finally
+        {
+            // Detach before disposing: the window polls the session from its
+            // draw tick. The screen going black is the device powering off.
+            frameBufferEmulator?.SetFrameSource(null);
+            frameBufferSession = null;
+            session?.Dispose();
+            runCancellation?.Dispose();
+            runCancellation = null;
+            SetFrameBufferEmulationRunning(false);
+        }
+    }
+
+    async Task DebugFrameBufferEmulatedAsync(DotNetProject project)
+    {
+        if (await PrepareFrameBufferLaunchAsync(project, CancellationToken.None) is not { } device)
+            return;
+
+        applicationOutput.Clear();
+        ShowBottomTab(applicationOutput.Widget);
+        ShowStatus($"Debugging {project.Name} in the Frame Buffer emulator…");
+        var session = new FrameBufferEmulatorSession(device.Width, device.Height);
+        try
+        {
+            frameBufferSession = session;
+            frameBufferEmulator!.SetFrameSource(session);
+            await DebugService.StartAsync(project, environment: session.EnvironmentVariables);
+            stopAction?.SetEnabled(true);
+            // The session is cleaned up in OnDebugEnded, whichever way the
+            // debuggee goes away.
+        }
+        catch (Exception ex)
+        {
+            LoggingService.LogError("Starting the debugger failed", ex);
+            ShowStatus($"Debugging could not start: {ex.Message}");
+            CleanupFrameBufferSession();
+        }
+    }
+
+    // Powers off whatever emulated app session is live: black screen, socket
+    // closed (the head hard-exits on end-of-file), transport disposed.
+    void CleanupFrameBufferSession()
+    {
+        if (frameBufferSession is not { } session)
+            return;
+        frameBufferEmulator?.SetFrameSource(null);
+        frameBufferSession = null;
+        session.Shutdown();
+        session.Dispose();
+        SetFrameBufferEmulationRunning(false);
+    }
+
     void OnFrameBufferEmulatorClosed()
     {
         SaveFrameBufferEmulatorSize();
         frameBufferEmulator = null;
         closeEmulatorAction?.SetEnabled(false);
+        // Closing the emulator with an app running terminates the app — the
+        // user unplugged the device.
+        if (frameBufferEmulationRunning)
+        {
+            if (DebugService.IsSessionActive && frameBufferSession != null)
+                _ = DebugService.StopAsync();
+            else
+                runCancellation?.Cancel();
+        }
         SetFrameBufferEmulationRunning(false);
         ShowStatus("Frame Buffer emulator closed");
     }
@@ -1149,8 +1311,7 @@ public class Workbench
 
         if (StartupHeadPolicy.IsFrameBufferHead(project.Name))
         {
-            documentManager.SaveAll();
-            ShowFrameBufferEmulator(project);
+            await DebugFrameBufferEmulatedAsync(project);
             return;
         }
 
@@ -1211,6 +1372,7 @@ public class Workbench
 
     void OnDebugEnded(int? exitCode)
     {
+        CleanupFrameBufferSession();
         OnDebugResumed();
         DisableStopUnlessEmulating();
         ShowStatus(exitCode is { } code ? $"Debugging ended — exit code {code}" : "Debugging ended");
@@ -1249,8 +1411,7 @@ public class Workbench
 
         if (StartupHeadPolicy.IsFrameBufferHead(project.Name))
         {
-            documentManager.SaveAll();
-            ShowFrameBufferEmulator(project);
+            await RunFrameBufferEmulatedAsync(project);
             return;
         }
 
