@@ -284,6 +284,29 @@ public class SolutionPad
         return best;
     }
 
+    // "Page.xaml.cs" is shown as a child of "Page.xaml" when both sit in the
+    // same folder — the Visual Studio arrangement. The code-behind is taken
+    // out of the sibling list and hung off its markup file instead; nothing
+    // on disk or in the project file moves.
+    static void NestCodeBehindFiles(List<(string Name, SolutionTreeNode Node)> files)
+    {
+        var markupByName = files
+            .Where(entry => entry.Name.EndsWith(".xaml", StringComparison.OrdinalIgnoreCase))
+            .ToDictionary(entry => entry.Name, entry => entry.Node, StringComparer.OrdinalIgnoreCase);
+        if (markupByName.Count == 0)
+            return;
+        files.RemoveAll(entry =>
+        {
+            if (!entry.Name.EndsWith(".xaml.cs", StringComparison.OrdinalIgnoreCase))
+                return false;
+            // "Page.xaml.cs" -> "Page.xaml"
+            if (!markupByName.TryGetValue(entry.Name[..^3], out var markup))
+                return false;
+            markup.CodeBehindPath = entry.Node.Path;
+            return true;
+        });
+    }
+
     static Gio.ListModel? CreateChildModel(GObject.Object item)
     {
         if (item is not SolutionTreeNode node || !node.HasChildren)
@@ -354,10 +377,20 @@ public class SolutionPad
                             files.Add((fileName, SolutionTreeNode.Create(SolutionTreeNodeKind.File, fileName, linked.RealPath, linked: true)));
                         }
                     }
+                    NestCodeBehindFiles(files);
                     foreach (var entry in folders.OrderBy(f => f.Name, StringComparer.OrdinalIgnoreCase))
                         children.Append(entry.Node);
                     foreach (var entry in files.OrderBy(f => f.Name, StringComparer.OrdinalIgnoreCase))
                         children.Append(entry.Node);
+                    break;
+
+                case SolutionTreeNodeKind.File:
+                    // Only a markup file with a code-behind gets here.
+                    if (node.CodeBehindPath.Length > 0)
+                    {
+                        var codeBehind = new FilePath(node.CodeBehindPath);
+                        children.Append(SolutionTreeNode.Create(SolutionTreeNodeKind.File, codeBehind.FileName, codeBehind));
+                    }
                     break;
             }
         }

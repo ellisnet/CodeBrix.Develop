@@ -32,6 +32,12 @@ public class OptionsDialog
     readonly List<PageEntry> pages = new();
     bool applied;
 
+    /// <summary>
+    /// Raised once the user's changes have been written to the preferences —
+    /// for whatever has to be redrawn from them.
+    /// </summary>
+    public event Action? Applied;
+
     sealed class PageEntry
     {
         public required OptionsSection Section { get; init; }
@@ -163,6 +169,7 @@ public class OptionsDialog
         foreach (var page in pages)
             page.Panel?.ApplyChanges();
         applied = true;
+        Applied?.Invoke();
         RememberCurrentPage();
         return true;
     }

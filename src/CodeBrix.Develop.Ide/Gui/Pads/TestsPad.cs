@@ -12,6 +12,7 @@ using System.Collections.Generic;
 using System.Linq;
 using CodeBrix.Develop.Core;
 using CodeBrix.Develop.Core.Testing;
+using CodeBrix.Develop.Ide.Themes;
 using Gdk = CodeBrix.Develop.UI.Gdk;
 using Gio = CodeBrix.Develop.UI.Gio;
 using GObject = CodeBrix.Develop.UI.GObject;
@@ -52,8 +53,9 @@ public partial class TestTreeNode
 /// <summary>
 /// The Tests pad: the solution's automated tests as a live tree — project →
 /// namespace → class → method — with per-node red/green/yellow status icons,
-/// a Run/Debug/Stop toolbar, and a text filter. Shares the left dock with
-/// the Solution pad (a Solution | Tests notebook).
+/// a Run/Debug/Stop toolbar, a text filter, and the running/finished run's
+/// summary along the bottom. Shares the left dock with the Solution pad
+/// (a Solution | Tests notebook).
 /// </summary>
 public class TestsPad
 {
@@ -62,12 +64,19 @@ public class TestsPad
     readonly Gtk.ListView listView;
     readonly Gtk.SignalListItemFactory factory;
     readonly Gtk.SearchEntry filterEntry;
+    readonly Gtk.Widget summarySeparator;
+    readonly Gtk.Box summaryBox;
+    readonly Gtk.ProgressBar progressBar;
+    readonly Gtk.Label progressLabel;
+    readonly Gtk.Label countsLabel;
     // Callbacks marshalled to native code: keep strong references so their
     // delegates outlive the widgets (same rule as SolutionPad).
     readonly Gtk.TreeListModelCreateModelFunc createChildModel;
     readonly List<Gtk.GestureClick> rowGestures = new();
     Gtk.MultiSelection selection;
     string filterText = "";
+    IReadOnlyList<TestNode> targetMethods = Array.Empty<TestNode>();
+    bool running;
 
     /// <summary>Raised when the user activates a test method (navigate to its source).</summary>
     public event Action<FilePath, int>? NavigateRequested;
@@ -143,10 +152,44 @@ public class TestsPad
             Reload();
         };
 
+        // The run summary lives along the bottom of the pad: a progress line
+        // (bar + "x of y", which settles into "y total 12.3s"), and a counts
+        // line under it. Both are hidden until a run starts — an empty bar
+        // over "0 Passed" would be reporting on a run that never happened.
+        progressBar = Gtk.ProgressBar.New();
+        progressBar.SetHexpand(true);
+        progressBar.SetValign(Gtk.Align.Center);
+        progressLabel = Gtk.Label.New("");
+        progressLabel.SetXalign(1);
+        countsLabel = Gtk.Label.New("");
+        countsLabel.SetXalign(0);
+        countsLabel.SetEllipsize(CodeBrix.Develop.UI.Pango.EllipsizeMode.End);
+
+        var progressRow = Gtk.Box.New(Gtk.Orientation.Horizontal, 8);
+        progressRow.Append(progressBar);
+        progressRow.Append(progressLabel);
+
+        summaryBox = Gtk.Box.New(Gtk.Orientation.Vertical, 2);
+        summaryBox.SetMarginStart(8);
+        summaryBox.SetMarginEnd(8);
+        summaryBox.SetMarginTop(4);
+        summaryBox.SetMarginBottom(4);
+        summaryBox.Append(progressRow);
+        summaryBox.Append(countsLabel);
+        summarySeparator = Gtk.Separator.New(Gtk.Orientation.Horizontal);
+        summaryBox.SetVisible(false);
+        summarySeparator.SetVisible(false);
+
         root = Gtk.Box.New(Gtk.Orientation.Vertical, 0);
         root.Append(BuildToolbar());
         root.Append(Gtk.Separator.New(Gtk.Orientation.Horizontal));
         root.Append(scrolled);
+        root.Append(summarySeparator);
+        root.Append(summaryBox);
+
+        ApplyThemeColors();
+        // The pad lives as long as the application; no unsubscribe needed.
+        ThemeService.ThemeChanged += ApplyThemeColors;
     }
 
     /// <summary>The widget to place in the workbench.</summary>
@@ -220,7 +263,123 @@ public class TestsPad
     {
         filterText = "";
         filterEntry.SetText("");
+        ClearSummary();
         Reload();
+    }
+
+    /// <summary>
+    /// Shows the summary for a starting run over the given method nodes —
+    /// progress reports against their count. Must be called on the UI thread.
+    /// </summary>
+    public void BeginRun(IReadOnlyList<TestNode> targets)
+    {
+        targetMethods = targets;
+        running = true;
+        progressBar.SetFraction(0);
+        progressLabel.SetText($"0 of {targets.Count}");
+        SetCounts(0, 0, 0);
+        ShowSummary(true);
+    }
+
+    /// <summary>
+    /// Advances the summary after a method node's status changed. Must be
+    /// called on the UI thread.
+    /// </summary>
+    public void OnTestFinished(TestNode method)
+    {
+        if (!running)
+            return;
+        int done = 0, passed = 0, failed = 0, skipped = 0;
+        foreach (var target in targetMethods)
+        {
+            switch (target.Status)
+            {
+                case TestStatus.Passed: done++; passed++; break;
+                case TestStatus.Failed: done++; failed++; break;
+                case TestStatus.Skipped: done++; skipped++; break;
+            }
+        }
+        if (targetMethods.Count > 0)
+            progressBar.SetFraction(Math.Min(1.0, (double) done / targetMethods.Count));
+        progressLabel.SetText($"{done} of {targetMethods.Count}");
+        SetCounts(passed, failed, skipped);
+    }
+
+    /// <summary>Settles the summary on the finished run. Must be called on the UI thread.</summary>
+    public void EndRun(TestRunSummary summary)
+    {
+        running = false;
+        ShowSummary(true);
+        progressBar.SetFraction(1.0);
+        if (summary.BuildFailed || summary.Error.Length > 0)
+        {
+            // No counts to report: the run never got as far as a test.
+            progressLabel.SetText("");
+            lastCounts = null;
+            countsLabel.SetMarkup($"<span foreground=\"{badColor}\">{Escape(
+                summary.Error.Length > 0 ? summary.Error : "Build failed")}</span>");
+            return;
+        }
+        progressLabel.SetText(summary.Cancelled
+            ? "cancelled"
+            : $"{summary.Total} total   {summary.Elapsed.TotalSeconds:F1}s");
+        SetCounts(summary.Passed, summary.Failed, summary.Skipped);
+    }
+
+    /// <summary>Hides the run summary (no run to report on). Must be called on the UI thread.</summary>
+    public void ClearSummary()
+    {
+        running = false;
+        targetMethods = Array.Empty<TestNode>();
+        progressBar.SetFraction(0);
+        progressLabel.SetText("");
+        lastCounts = null;
+        countsLabel.SetText("");
+        ShowSummary(false);
+    }
+
+    void ShowSummary(bool visible)
+    {
+        summaryBox.SetVisible(visible);
+        summarySeparator.SetVisible(visible);
+    }
+
+    // The counts are remembered so a theme change can re-render them: the
+    // colors are baked into the label's markup when it is set.
+    (int Passed, int Failed, int Skipped)? lastCounts;
+
+    void SetCounts(int passed, int failed, int skipped)
+    {
+        lastCounts = (passed, failed, skipped);
+        countsLabel.SetMarkup(
+            $"{Colored(passed, "Passed", goodColor)}   {Colored(failed, "Failed", badColor)}   "
+            + Colored(skipped, "Skipped", warningColor));
+    }
+
+    static string Colored(int count, string label, string color)
+        => $"<span foreground=\"{color}\">{count} {label}</span>";
+
+    static string Escape(string text) =>
+        text.Replace("&", "&amp;").Replace("<", "&lt;").Replace(">", "&gt;");
+
+    string goodColor = "#388A34";
+    string warningColor = "#BF8803";
+    string badColor = "#E51400";
+
+    void ApplyThemeColors()
+    {
+        var theme = ThemeService.CurrentDefinition;
+        if (theme == null)
+            return;
+        var dark = theme.Info.IsDark;
+        goodColor = theme.GetColor(dark ? "#89D185" : "#388A34",
+            "testing.iconPassed", "terminal.ansiGreen", "charts.green");
+        warningColor = theme.GetColor(dark ? "#CCA700" : "#BF8803",
+            "testing.iconSkipped", "editorWarning.foreground", "list.warningForeground", "terminal.ansiYellow");
+        badColor = theme.GetColor(dark ? "#F14C4C" : "#E51400",
+            "testing.iconFailed", "editorError.foreground", "errorForeground", "list.errorForeground");
+        if (lastCounts is { } counts)
+            SetCounts(counts.Passed, counts.Failed, counts.Skipped);
     }
 
     /// <summary>

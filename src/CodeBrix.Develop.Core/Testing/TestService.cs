@@ -62,6 +62,14 @@ public static class TestService
     /// <summary>Raised for every line of build/runner output.</summary>
     public static event Action<string> OutputReceived;
 
+    /// <summary>
+    /// Raised with a finished test's display name and everything it wrote to
+    /// xUnit's ITestOutputHelper. Only the native runner dialect raises this:
+    /// it reports output over its JSON protocol, where the MTP runner prints
+    /// a "Standard output" section on its own console.
+    /// </summary>
+    public static event Action<string, string> TestOutputReceived;
+
     /// <summary>Whether the solution contains at least one runnable test project.</summary>
     public static bool SolutionHasTests(Solution solution)
         => solution != null && solution.Projects.Any(project => project.IsTestProject);
@@ -411,8 +419,17 @@ public static class TestService
                     case "test-skipped":
                     case "test-not-run":
                         var row = XunitRunnerParsing.ReadNativeResultEvent(eventType, document.RootElement, displayNamesByTestId);
+                        // The native reporter speaks only JSON, so the result
+                        // line the MTP runner prints for each test is
+                        // synthesized here: both dialects then read the same
+                        // in the Test Results console.
+                        if (row.DisplayName.Length > 0)
+                            OutputReceived?.Invoke(
+                                $"{OutcomeWord(row.Status)} {row.DisplayName} ({row.DurationSeconds * 1000:F0}ms)");
                         if (row.MethodFullName.Length > 0)
                             ApplyRow(projectRoot, methodsByFullName, accumulators, row, summary);
+                        if (row.Output.Length > 0)
+                            TestOutputReceived?.Invoke(row.DisplayName, row.Output);
                         break;
                 }
             }
@@ -434,6 +451,16 @@ public static class TestService
         if (summary.Total == 0 && exitCode != 0 && !cancellationToken.IsCancellationRequested)
             summary.Error = $"The test runner for {project.Name} exited with code {exitCode} without reporting results.";
     }
+
+    // The MTP runner's wording for an outcome, so a synthesized native result
+    // line is indistinguishable from a printed MTP one.
+    static string OutcomeWord(TestStatus status) => status switch
+    {
+        TestStatus.Passed => "passed",
+        TestStatus.Failed => "failed",
+        TestStatus.Skipped => "skipped",
+        _ => "not run",
+    };
 
     static ProcessStartInfo CreateRunnerStartInfo(FilePath executable, List<string> arguments, FilePath workingDirectory)
     {

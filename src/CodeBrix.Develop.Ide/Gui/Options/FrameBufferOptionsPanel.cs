@@ -63,9 +63,16 @@ public class FrameBufferOptionsPanel : OptionsPanel
         var description = Gtk.Label.New(
             "These settings describe the emulated device a Linux Frame Buffer head is\n" +
             "run and debugged against. The emulator window keeps the proportions of the\n" +
-            "resolution selected here. Changes apply to the next emulator window that\n" +
-            "opens: an emulator already open stays as it is until it is closed, from\n" +
-            "Tools > Close Emulator or the window manager.");
+            "resolution selected here. Orientation and resolution changes apply to the\n" +
+            "next emulator window that opens: an emulator already open stays as it is\n" +
+            "until it is closed, from Tools > Close Emulator or the window manager.\n" +
+            "\n" +
+            "Hardware keyboard support applies at once. With it on, keystrokes go to the\n" +
+            "application running in the emulator whenever the emulator window is the\n" +
+            "active one, modifier combinations included — the keyboard belongs to the\n" +
+            "device while its window has the focus. With it off the device behaves as a\n" +
+            "kiosk with no keyboard attached, which is how a Linux Frame Buffer head\n" +
+            "usually runs.");
         description.SetXalign(0);
         description.AddCssClass("dim-label");
         description.SetMarginTop(10);

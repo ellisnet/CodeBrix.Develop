@@ -41,7 +41,7 @@ public class Workbench
     readonly Gtk.ApplicationWindow window;
     readonly SolutionPad solutionPad;
     readonly TestsPad testsPad;
-    readonly TestResultsPad testResultsPad;
+    readonly OutputPad testOutput;
     readonly Gtk.Notebook leftNotebook;
     readonly DocumentManager documentManager;
     readonly OutputPad buildOutput;
@@ -70,6 +70,7 @@ public class Workbench
     // close it or the application exits.
     FrameBufferEmulatorWindow? frameBufferEmulator;
     bool frameBufferEmulationRunning;
+    bool warnedAboutHeadWithoutKeyboard;
 
     // The transport of the emulated app currently running (or being debugged);
     // null between launches. The window's Touch handler reads this field, so
@@ -79,6 +80,7 @@ public class Workbench
     Gio.SimpleAction? buildAction, rebuildAction, cleanAction, runAction, stopAction, closeSolutionAction;
     Gio.SimpleAction? debugAction, stepOverAction, stepIntoAction, stepOutAction;
     Gio.SimpleAction? updateCodeBrixPackagesAction, closeEmulatorAction;
+    Gio.SimpleAction? openSolutionFolderAction, openSolutionTerminalAction;
     Gio.SimpleAction? runAllTestsAction, runSelectedTestsAction, debugSelectedTestAction;
     Gio.SimpleAction? runTestAtCaretAction, debugTestAtCaretAction, rediscoverTestsAction;
 
@@ -123,14 +125,15 @@ public class Workbench
         ideLog = new OutputPad(colorizeLogLevels: true);
         callStackPad = new CallStackPad();
         callStackPad.FrameActivated += (file, line) => NavigateTo(file, line);
-        testResultsPad = new TestResultsPad();
-        testResultsPad.NavigateRequested += (file, line) => NavigateTo(file, line);
+        // The Test Results tab is the runner's console: what `dotnet test`
+        // would have printed. The run's scoreboard lives on the Tests pad.
+        testOutput = new OutputPad();
         bottomNotebook = Gtk.Notebook.New();
         bottomNotebook.AppendPage(applicationOutput.Widget, Gtk.Label.New("Application Output"));
         bottomNotebook.AppendPage(buildOutput.Widget, Gtk.Label.New("Build Output"));
         bottomNotebook.AppendPage(nugetOutput.Widget, Gtk.Label.New("Nuget Output"));
         bottomNotebook.AppendPage(callStackPad.Widget, Gtk.Label.New("Call Stack"));
-        bottomNotebook.AppendPage(testResultsPad.Widget, Gtk.Label.New("Test Results"));
+        bottomNotebook.AppendPage(testOutput.Widget, Gtk.Label.New("Test Results"));
         bottomNotebook.AppendPage(ideLog.Widget, Gtk.Label.New("IDE Log"));
         bottomNotebook.SetVexpand(false);
 
@@ -154,11 +157,17 @@ public class Workbench
         TestService.RunStarted += () => uiContext.Post(_ => testsPad.RefreshStatuses(), null);
         TestService.TestFinished += node =>
         {
-            uiContext.Post(_ => testResultsPad.OnTestFinished(node), null);
+            uiContext.Post(_ =>
+            {
+                testsPad.OnTestFinished(node);
+                AppendTestOutcome(node);
+            }, null);
             QueueTestStatusRefresh();
         };
         TestService.RunFinished += summary => uiContext.Post(_ => OnTestRunFinished(summary), null);
-        TestService.OutputReceived += line => uiContext.Post(_ => buildOutput.AppendLine(line), null);
+        TestService.OutputReceived += line => uiContext.Post(_ => testOutput.AppendLine(line), null);
+        TestService.TestOutputReceived += (displayName, output) =>
+            uiContext.Post(_ => AppendTestOutputHelperText(displayName, output), null);
 
         verticalSplit = Gtk.Paned.New(Gtk.Orientation.Vertical);
         verticalSplit.SetStartChild(documentManager.Widget);
@@ -267,16 +276,33 @@ public class Workbench
         toolbar.Append(ToolButton("open-16", "app.open-solution", "Open Solution (Ctrl+O)"));
         toolbar.Append(ToolButton("save-16", "app.save", "Save (Ctrl+S)"));
         toolbar.Append(ToolButton("save-all-16", "app.save-all", "Save All (Ctrl+Shift+S)"));
-        toolbar.Append(ToolbarSeparator());
-        toolbar.Append(ToolButton("build-target-16", "app.build", "Build Solution (Ctrl+Shift+B)"));
-        toolbar.Append(ToolbarSeparator());
-        toolbar.Append(ToolButton("bug-16", "app.debug", "Start Debugging / Continue (F5)"));
+        toolbar.Append(ToolbarGroupSpace());
+        toolbar.Append(ToolButton("pad-download-16", "app.build", "Build Solution (Ctrl+Shift+B)"));
+        toolbar.Append(ToolButton("pad-call-stack-16", "app.rebuild", "Rebuild Solution"));
+        toolbar.Append(ToolbarGroupSpace());
+        // Run before Debug, the same order the Tests pad's toolbar uses.
         toolbar.Append(ToolButton("execute-16", "app.run", "Start Without Debugging (Ctrl+F5)"));
+        toolbar.Append(ToolButton("bug-16", "app.debug", "Start Debugging / Continue (F5)"));
         toolbar.Append(ToolButton("stop-16", "app.stop", "Stop (Shift+F5)"));
-        toolbar.Append(ToolbarSeparator());
+        toolbar.Append(ToolbarGroupSpace());
+        // A group of its own: the emulator is only ever there to be closed
+        // while one is open, so the button spends most of its life disabled.
+        toolbar.Append(ToolButton("close-solution-16", "app.close-emulator", "Close Emulator"));
+        toolbar.Append(ToolbarGroupSpace());
         toolbar.Append(ToolButton("step-over-16", "app.step-over", "Step Over (F10)"));
         toolbar.Append(ToolButton("step-in-16", "app.step-into", "Step Into (F11)"));
         toolbar.Append(ToolButton("step-out-16", "app.step-out", "Step Out (Shift+F11)"));
+        toolbar.Append(ToolbarGroupSpace());
+        // Same action as the Tests pad's own button, plus the pane switching a
+        // toolbar click deserves: the Tests pad comes to the front here, and
+        // the run itself brings up the Test Results tab.
+        var runAllTests = ToolButton("run-unit-tests-16", "app.run-all-tests", "Run All Tests (Ctrl+T)");
+        runAllTests.OnClicked += (_, _) => ShowLeftTab(testsPad.Widget);
+        toolbar.Append(runAllTests);
+        toolbar.Append(ToolButton("folder-solution-16", "app.open-solution-folder",
+            "Open Solution Folder (Ctrl+Shift+O)"));
+        toolbar.Append(ToolButton("pad-immediate-16", "app.open-solution-terminal",
+            "Open Solution Terminal (Ctrl+`)"));
         return toolbar;
     }
 
@@ -292,14 +318,14 @@ public class Workbench
         return button;
     }
 
-    static Gtk.Widget ToolbarSeparator()
+    // What sets one group of toolbar buttons off from the next: a gap, and
+    // nothing drawn. A ruled line between every group competes with the icons
+    // for attention, which is the opposite of what a toolbar wants.
+    static Gtk.Widget ToolbarGroupSpace()
     {
-        var separator = Gtk.Separator.New(Gtk.Orientation.Vertical);
-        separator.SetMarginStart(4);
-        separator.SetMarginEnd(4);
-        separator.SetMarginTop(4);
-        separator.SetMarginBottom(4);
-        return separator;
+        var spacer = Gtk.Box.New(Gtk.Orientation.Horizontal, 0);
+        spacer.SetSizeRequest(12, 1);
+        return spacer;
     }
 
     /// <summary>Shows the window.</summary>
@@ -312,6 +338,10 @@ public class Workbench
     // survives tab reordering.
     void ShowBottomTab(Gtk.Widget widget) =>
         bottomNotebook.SetCurrentPage(bottomNotebook.PageNum(widget));
+
+    // The same, for the Solution/Tests notebook in the left pane.
+    void ShowLeftTab(Gtk.Widget widget) =>
+        leftNotebook.SetCurrentPage(leftNotebook.PageNum(widget));
 
     void InstallActions()
     {
@@ -336,7 +366,7 @@ public class Workbench
         }, "<Control>q");
 
         buildAction = AddAction("build", () => _ = BuildAsync(rebuild: false), "<Control><Shift>b", enabled: false);
-        rebuildAction = AddAction("rebuild", () => _ = BuildAsync(rebuild: true), null, enabled: false);
+        rebuildAction = AddAction("rebuild", () => _ = BuildAsync(rebuild: true), "<Control><Shift>r", enabled: false);
         cleanAction = AddAction("clean", () => _ = CleanAsync(), null, enabled: false);
         // VS/MonoDevelop convention: F5 debugs (or continues), Ctrl+F5 runs
         // without debugging.
@@ -351,6 +381,10 @@ public class Workbench
         AddAction("complete", () => documentManager.ActiveDocument?.ShowCompletion(), "<Control>space");
         updateCodeBrixPackagesAction = AddAction("update-codebrix-packages", () => _ = UpdateCodeBrixPackagesAsync(), null, enabled: false);
         closeEmulatorAction = AddAction("close-emulator", () => frameBufferEmulator?.Close(), null, enabled: false);
+        openSolutionFolderAction = AddAction("open-solution-folder", OpenSolutionFolder, "<Control><Shift>o", enabled: false);
+        // Not Ctrl+Shift+T — Run Test at Caret has it. Ctrl+` is the
+        // "show me a terminal" binding editors have taught everyone.
+        openSolutionTerminalAction = AddAction("open-solution-terminal", OpenSolutionTerminal, "<Control>grave", enabled: false);
         AddAction("about", ShowAbout);
 
         // The MonoDevelop convention: Ctrl+T runs every test in the solution.
@@ -428,6 +462,8 @@ public class Workbench
         testMenu.Append("S_top", "app.stop");
 
         var toolsMenu = Gio.Menu.New();
+        toolsMenu.Append("Open Solution _Folder", "app.open-solution-folder");
+        toolsMenu.Append("Open Solution _Terminal", "app.open-solution-terminal");
         toolsMenu.Append("_Update CodeBrix Package References", "app.update-codebrix-packages");
         toolsMenu.Append("Close _Emulator", "app.close-emulator");
 
@@ -504,6 +540,10 @@ public class Workbench
             return;
         }
 
+        // The solution that owned the emulated device is on its way out, so the
+        // emulator window closes here too — waiting until the load succeeded,
+        // as a failed open leaves the current solution (and its device) alone.
+        CloseFrameBufferEmulator();
         IdeApp.CurrentSolution = solution;
         if (solution.IsCodeBrixPlatformApplication)
         {
@@ -511,8 +551,9 @@ public class Workbench
             _ = CheckCodeBrixPackagesAsync(solution);
         }
         solutionPad.LoadSolution(solution);
-        window.Title = $"{solution.Name} – CodeBrix Develop";
-        foreach (var action in new[] { buildAction, rebuildAction, cleanAction, runAction, debugAction, closeSolutionAction })
+        UpdateWindowTitle();
+        foreach (var action in new[] { buildAction, rebuildAction, cleanAction, runAction, debugAction, closeSolutionAction,
+                     openSolutionFolderAction, openSolutionTerminalAction })
             action?.SetEnabled(true);
         updateCodeBrixPackagesAction?.SetEnabled(solution.IsCodeBrixPlatformApplication);
         // The Tests pad fills from a fast syntax scan — no build needed.
@@ -961,8 +1002,10 @@ public class Workbench
         }
 
         buildOutput.Clear();
-        testResultsPad.BeginRun(targets);
-        ShowBottomTab(testResultsPad.Widget);
+        testOutput.Clear();
+        reportedTestOutcomes.Clear();
+        testsPad.BeginRun(targets);
+        ShowBottomTab(testOutput.Widget);
         ShowStatus($"Running {targets.Count} test{(targets.Count == 1 ? "" : "s")}…");
         SetTestActionsEnabled(false);
         stopAction?.SetEnabled(true);
@@ -980,9 +1023,67 @@ public class Workbench
         }
     }
 
+    // The runner names each test on its own console line as it finishes, but
+    // the failure message and stack reach us over the protocol instead — so
+    // they are printed under the runner's line, indented, the way a
+    // command-line run shows them. A method's outcome can refine mid-run (a
+    // theory's later row flipping a skip to a failure), so each node reports
+    // once per distinct outcome.
+    readonly Dictionary<TestNode, TestStatus> reportedTestOutcomes = new();
+
+    void AppendTestOutcome(TestNode method)
+    {
+        if (method.Status is not (TestStatus.Failed or TestStatus.Skipped))
+            return;
+        if (reportedTestOutcomes.TryGetValue(method, out var reported) && reported == method.Status)
+            return;
+        reportedTestOutcomes[method] = method.Status;
+        if (method.LastResult is not { } result)
+            return;
+        var color = method.Status == TestStatus.Failed ? OutputColor.Bad : OutputColor.Warning;
+        if (result.Message.Length > 0)
+            testOutput.AppendSegments((Indent(result.Message), color));
+        if (result.StackTrace.Length > 0)
+            testOutput.AppendLine(Indent(result.StackTrace));
+    }
+
+    static string Indent(string text) =>
+        "    " + text.TrimEnd().Replace("\n", "\n    ");
+
+    // What the test wrote to xUnit's ITestOutputHelper, under a heading
+    // naming the test that wrote it. A theory row's display name already
+    // carries its arguments; a plain fact gets the "()" that says "method".
+    void AppendTestOutputHelperText(string displayName, string output)
+    {
+        var name = displayName.Contains('(') ? displayName : displayName + "()";
+        testOutput.AppendSegments(($"xUnit Test Output from {name}:", OutputColor.Good));
+        testOutput.AppendLine(Indent(output));
+        // A blank line closes the block, so the next test's result line does
+        // not read as more of this test's output.
+        testOutput.AppendLine("");
+    }
+
+    // A run that reaches the runner ends with the runner's own summary line.
+    // These are the two ways it never gets to print one.
+    void AppendTestRunSummary(TestRunSummary summary)
+    {
+        if (summary.BuildFailed || summary.Error.Length > 0)
+        {
+            testOutput.AppendLine("");
+            testOutput.AppendSegments(
+                (summary.Error.Length > 0 ? summary.Error : "Build failed — no tests ran.", OutputColor.Bad));
+        }
+        else if (summary.Cancelled)
+        {
+            testOutput.AppendLine("");
+            testOutput.AppendSegments(("Test run cancelled.", OutputColor.Warning));
+        }
+    }
+
     void OnTestRunFinished(TestRunSummary summary)
     {
-        testResultsPad.EndRun(summary);
+        testsPad.EndRun(summary);
+        AppendTestRunSummary(summary);
         testsPad.RefreshStatuses();
         if (!DebugService.IsSessionActive)
             DisableStopUnlessEmulating();
@@ -990,8 +1091,10 @@ public class Workbench
         if (summary.BuildFailed || summary.Error.Length > 0)
         {
             ShowStatus(summary.Error.Length > 0 ? summary.Error : "Test run failed");
+            // The compiler's complaint went to the runner console along with
+            // everything else the run printed.
             if (summary.BuildFailed)
-                ShowBottomTab(buildOutput.Widget);
+                ShowBottomTab(testOutput.Widget);
         }
         else if (summary.Cancelled)
         {
@@ -1106,6 +1209,9 @@ public class Workbench
             // Touches (device pixels) go to whatever app is currently live;
             // with no session the finger presses a powered-off screen.
             frameBufferEmulator.Touch += (kind, x, y) => frameBufferSession?.SendTouch(kind, x, y);
+            // The emulated device's keyboard, when the user has said the
+            // device has one.
+            frameBufferEmulator.KeyHandler = ForwardEmulatedKey;
             closeEmulatorAction?.SetEnabled(true);
         }
 
@@ -1129,6 +1235,7 @@ public class Workbench
     async Task<(int Width, int Height)?> PrepareFrameBufferLaunchAsync(DotNetProject project, CancellationToken cancellationToken)
     {
         documentManager.SaveAll();
+        warnedAboutHeadWithoutKeyboard = false;
         ShowFrameBufferEmulator(project);
         if (frameBufferEmulator == null)
             return null;
@@ -1255,6 +1362,50 @@ public class Workbench
         session.Shutdown();
         session.Dispose();
         SetFrameBufferEmulationRunning(false);
+    }
+
+    // Closes the emulator window, if one is open — the device belonged to the
+    // solution being closed or replaced, so it goes with it. Everything else is
+    // the Closed handler's job: it pulls the power on an app still running
+    // there, persists the size, and disables Tools > Close Emulator. A no-op
+    // when no emulator was ever opened.
+    void CloseFrameBufferEmulator()
+    {
+        frameBufferEmulator?.Close();
+        frameBufferEmulationRunning = false;
+    }
+
+    // True when the keystroke went to the emulated application, which is what
+    // keeps it from the IDE's own shortcuts. The device only has a keyboard if
+    // Options says so, something is running on it, and the head knows how to
+    // take keys — a head built before keyboard support would silently drop
+    // them, so the IDE keeps its shortcuts instead.
+    bool ForwardEmulatedKey(bool pressed, uint virtualKey, uint hardwareKeyCode, uint unicodeCodepoint)
+    {
+        if (!IdePreferences.FrameBufferHardwareKeyboard.Value)
+            return false;
+        if (frameBufferSession is not { IsConnected: true } session)
+            return false;
+        if (!session.SupportsKeyboard)
+        {
+            WarnOnceAboutHeadWithoutKeyboard();
+            return false;
+        }
+        session.SendKey(pressed, virtualKey, hardwareKeyCode, unicodeCodepoint);
+        return true;
+    }
+
+    // Said once per run, not once per keystroke.
+    void WarnOnceAboutHeadWithoutKeyboard()
+    {
+        if (warnedAboutHeadWithoutKeyboard)
+            return;
+        warnedAboutHeadWithoutKeyboard = true;
+        LoggingService.LogWarning(
+            "Hardware keyboard support is enabled, but the emulated head does not accept key input " +
+            "(it declared no keyboard capability) — keystrokes stay with the IDE. Updating the " +
+            "application's CodeBrix.Platform packages should resolve it.");
+        ShowStatus("The emulated application's head does not accept keyboard input (see the IDE Log)");
     }
 
     void OnFrameBufferEmulatorClosed()
@@ -1498,9 +1649,10 @@ public class Workbench
             return;
         // Any live debug session dies with the solution, and per policy the
         // breakpoints are lost too. Emulation belonged to a head in this
-        // solution, so it stops too — the window itself is left alone.
-        frameBufferEmulationRunning = false;
+        // solution, so the emulator window closes with it — the debugger goes
+        // first, so the close is not left racing a session teardown.
         DebugService.Shutdown(clearBreakpoints: true);
+        CloseFrameBufferEmulator();
         documentManager.SaveAll();
         foreach (var document in documentManager.Documents.ToList())
             documentManager.CloseDocument(document);
@@ -1508,7 +1660,8 @@ public class Workbench
         IdeApp.CurrentSolution = null;
         solutionPad.Clear();
         TestService.Clear();
-        testResultsPad.Clear();
+        testOutput.Clear();
+        testsPad.ClearSummary();
         // Every output tab describes the now-closed solution; blank them so the
         // stale build/run/NuGet/call-stack text isn't mistaken for the next
         // solution's. The IDE Log is not solution-scoped — it keeps accumulating
@@ -1518,13 +1671,39 @@ public class Workbench
         nugetOutput.Clear();
         callStackPad.Clear();
         foreach (var action in new[] { buildAction, rebuildAction, cleanAction, runAction, debugAction,
-                     stepOverAction, stepIntoAction, stepOutAction, closeSolutionAction, updateCodeBrixPackagesAction })
+                     stepOverAction, stepIntoAction, stepOutAction, closeSolutionAction, updateCodeBrixPackagesAction,
+                     openSolutionFolderAction, openSolutionTerminalAction })
             action?.SetEnabled(false);
         SetTestActionsEnabled(false);
-        window.Title = "CodeBrix Develop";
+        UpdateWindowTitle();
         IdePreferences.LastSolution.Value = "";
         IdePreferences.StartupProject.Value = "";
         ShowStatus("Ready");
+    }
+
+    // The folder the .sln/.slnx sits in — what "the solution folder" means to
+    // the file manager and the terminal. Empty with no solution loaded.
+    string SolutionDirectory =>
+        IdeApp.CurrentSolution is { } solution && !solution.FileName.IsNullOrEmpty
+            ? (string) solution.FileName.ParentDirectory
+            : "";
+
+    void OpenSolutionFolder()
+    {
+        if (SolutionDirectory is not { Length: > 0 } directory)
+            return;
+        ShowStatus(DesktopServices.TryOpenFolder(directory, out var error)
+            ? $"Opened {directory}"
+            : error);
+    }
+
+    void OpenSolutionTerminal()
+    {
+        if (SolutionDirectory is not { Length: > 0 } directory)
+            return;
+        ShowStatus(DesktopServices.TryOpenTerminal(directory, out var error)
+            ? $"Opened a terminal in {directory}"
+            : error);
     }
 
     void ShowNewApplicationDialog()
@@ -1554,7 +1733,28 @@ public class Workbench
     void ShowOptions()
     {
         var dialog = new OptionsDialog(window, IdeOptionsSections.Build());
+        // The spelling of the solution name in the title is an Appearance
+        // option, so the title is redrawn once the options are applied.
+        dialog.Applied += UpdateWindowTitle;
         dialog.Present();
+    }
+
+    // "<solution> – CodeBrix Develop", or the application name alone with
+    // nothing open. The spaced spelling is the user's choice (Appearance
+    // options): with it on the title no longer carries the solution's name
+    // verbatim, so a window search for the application being built cannot
+    // match the IDE.
+    void UpdateWindowTitle()
+    {
+        if (IdeApp.CurrentSolution is not { } solution)
+        {
+            window.Title = "CodeBrix Develop";
+            return;
+        }
+        var name = IdePreferences.SpacedSolutionTitle.Value
+            ? SolutionTitleFormatter.WithSpaces(solution.Name)
+            : solution.Name;
+        window.Title = $"{name} – CodeBrix Develop";
     }
 
     void ShowAbout()

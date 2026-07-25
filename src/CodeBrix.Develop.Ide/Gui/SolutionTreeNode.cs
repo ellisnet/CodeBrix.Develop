@@ -47,8 +47,15 @@ public partial class SolutionTreeNode
     /// <summary>What the node represents.</summary>
     public SolutionTreeNodeKind Kind { get; set; }
 
+    /// <summary>
+    /// The code-behind file shown as this node's only child — "Page.xaml.cs"
+    /// under "Page.xaml". Empty for every other node. Presentation only: the
+    /// file keeps its place on disk and in the project.
+    /// </summary>
+    public string CodeBehindPath { get; set; } = "";
+
     /// <summary>Whether the node can be expanded to show children.</summary>
-    public bool HasChildren => Kind != SolutionTreeNodeKind.File;
+    public bool HasChildren => Kind != SolutionTreeNodeKind.File || CodeBehindPath.Length > 0;
 
     /// <summary>The file-system path as a <see cref="FilePath"/>.</summary>
     public FilePath FilePath => new FilePath(Path);

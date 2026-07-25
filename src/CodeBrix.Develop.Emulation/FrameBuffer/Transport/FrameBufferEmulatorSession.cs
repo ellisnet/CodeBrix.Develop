@@ -165,6 +165,15 @@ public sealed class FrameBufferEmulatorSession : IFrameBufferFrameSource, IDispo
     public uint HeadCapabilities => headCapabilities;
 
     /// <summary>
+    /// Whether the connected head consumes key messages (it declared the
+    /// keyboard capability in its Hello). False before the head has connected,
+    /// and false for a head built before keyboard support existed — sending
+    /// keys to one would be shouting into a void.
+    /// </summary>
+    public bool SupportsKeyboard =>
+        (headCapabilities & FrameBufferEmulatorProtocol.CapabilityKeyboard) != 0;
+
+    /// <summary>
     /// Sends one touch event to the app, in DEVICE pixels. Does nothing when
     /// no app is connected; a send failure is not an error here — the read
     /// loop notices the dead socket and raises <see cref="Disconnected"/>.

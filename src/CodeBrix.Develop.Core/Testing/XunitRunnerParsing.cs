@@ -26,6 +26,7 @@ class TestRowResult
     public TestStatus Status = TestStatus.NotRun;
     public string Message = "";
     public string StackTrace = "";
+    public string Output = "";
     public double DurationSeconds;
 }
 
@@ -197,6 +198,9 @@ static class XunitRunnerParsing
         };
         if (root.TryGetProperty("ExecutionTime", out var timeElement) && timeElement.ValueKind == JsonValueKind.Number)
             row.DurationSeconds = timeElement.GetDouble();
+        // Whatever the test wrote to xUnit's ITestOutputHelper, in order.
+        if (root.TryGetProperty("Output", out var output) && output.ValueKind == JsonValueKind.String)
+            row.Output = output.GetString();
         if (status == TestStatus.Failed)
         {
             row.Message = JoinStringArray(root, "Messages");

@@ -12,6 +12,14 @@ using Gtk = CodeBrix.Develop.UI.Gtk;
 namespace CodeBrix.Develop.Emulation.FrameBuffer;
 
 /// <summary>
+/// Delivers one key transition to the emulated application: the WinUI virtual
+/// key, the X11-style hardware keycode (the evdev scancode plus 8) and the
+/// Unicode codepoint the key typed, or 0 for none. Returns whether the
+/// emulated device took the key.
+/// </summary>
+public delegate bool FrameBufferKeyHandler(bool pressed, uint virtualKey, uint hardwareKeyCode, uint unicodeCodepoint);
+
+/// <summary>
 /// The window a Linux Frame Buffer head is emulated in: a black screen
 /// inside a thin bezel, proportioned to the emulated device's resolution and
 /// orientation. It is a free-standing top-level window — not transient for
@@ -75,6 +83,7 @@ public sealed class FrameBufferEmulatorWindow : IDisposable
     readonly Gtk.Window window;
     readonly Gtk.AspectFrame screenFrame;
     readonly Gtk.DrawingArea screen;
+    readonly Gtk.EventControllerKey keyController;
 
     readonly int rememberedWidth;
     readonly int rememberedHeight;
@@ -118,6 +127,18 @@ public sealed class FrameBufferEmulatorWindow : IDisposable
     /// raised in test-pattern diagnostic mode.
     /// </summary>
     public event Action<FrameBufferTouchKind, int, int>? Touch;
+
+    /// <summary>
+    /// Called on the GTK main thread for each key transition while this window
+    /// has the keyboard focus, with the emulated device's keyboard as the
+    /// caller decides it: the WinUI virtual key, the X11-style hardware
+    /// keycode, and the typed character (0 on a release, or for a key that
+    /// produces no text). Returning true means the emulated device consumed
+    /// the key, and it stops there rather than travelling on through the
+    /// window. Left null, or returning false, the key is nobody's — which is
+    /// how a device with no keyboard attached behaves.
+    /// </summary>
+    public FrameBufferKeyHandler? KeyHandler { get; set; }
 
     /// <summary>
     /// Attaches a running emulated application's frames to the screen, or
@@ -207,6 +228,21 @@ public sealed class FrameBufferEmulatorWindow : IDisposable
             liveScreen = new FrameBufferScreen(screen, deviceWidth, deviceHeight);
             liveScreen.Touch += (kind, x, y) => Touch?.Invoke(kind, x, y);
         }
+
+        // The emulated device's keyboard. Capture phase, so the device is
+        // offered a key before anything the window itself might do with it —
+        // this window carries no menus or shortcuts of its own today, and the
+        // application's keys should not start competing with any it grows.
+        // (The IDE's accelerators live on the workbench's ApplicationWindow
+        // and never reached this plain window in the first place.) Nothing is
+        // consumed unless the handler says the device took it.
+        keyController = Gtk.EventControllerKey.New();
+        keyController.SetPropagationPhase(Gtk.PropagationPhase.Capture);
+        keyController.OnKeyPressed += (_, args) => ForwardKey(true, args.Keyval, args.Keycode, args.State);
+        // GTK 4's key-released signal cannot consume the event, and does not
+        // need to: shortcuts fire on the press, which was already answered.
+        keyController.OnKeyReleased += (_, args) => ForwardKey(false, args.Keyval, args.Keycode, args.State);
+        window.AddController(keyController);
 
         // Closing really closes — the window's place on screen goes with it,
         // which is the trade the user makes by closing rather than stopping.
@@ -298,6 +334,24 @@ public sealed class FrameBufferEmulatorWindow : IDisposable
     int VerticalChrome => screenFrame.GetHeight() > 0
         ? window.GetHeight() - screenFrame.GetHeight()
         : TitleBarHeight + BezelThickness;
+
+    // Hands one key transition to the emulated device. The virtual key comes
+    // from the PHYSICAL key (the hardware keycode), the way the real head
+    // reads its evdev keyboard; the character comes from the keyval GTK
+    // already resolved through the user's layout and modifiers, so Shift+1
+    // types "!" on a US layout and something else elsewhere — again as on the
+    // device. Only a press carries a character; a release has none to give.
+    bool ForwardKey(bool pressed, uint keyval, uint keycode, Gdk.ModifierType state)
+    {
+        if (disposed || KeyHandler is not { } handler)
+            return false;
+        var virtualKey = FrameBufferKeyMap.VirtualKeyFromKeycode(keycode);
+        var unicode = pressed
+            ? FrameBufferKeyMap.CharacterFromKeyval(Gdk.Functions.KeyvalToUnicode(keyval),
+                state.HasFlag(Gdk.ModifierType.ControlMask))
+            : 0;
+        return handler(pressed, virtualKey, keycode, unicode);
+    }
 
     // The window is about to be destroyed: stop watching it, and let the
     // caller persist the size while it is still readable.

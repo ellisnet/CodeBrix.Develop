@@ -28,6 +28,16 @@ public static class IdePreferences
         ConfigurationProperty.Create("CodeBrix.Develop.Ide.ColorTheme", "");
 
     /// <summary>
+    /// Whether the solution name in the window title is spelled out with
+    /// spaces — "Doom.Brix" shown as "Doom Brix". Off by default. On, the
+    /// IDE's window title no longer contains the solution's name verbatim,
+    /// so a search for the window of the application being built cannot
+    /// land on the IDE instead.
+    /// </summary>
+    public static readonly ConfigurationProperty<bool> SpacedSolutionTitle =
+        ConfigurationProperty.Create("CodeBrix.Develop.Ide.SpacedSolutionTitle", false);
+
+    /// <summary>
     /// The folder where the user's projects normally live, or "" to use the
     /// user's Documents folder. Read it through
     /// <see cref="IdeApp.GetProjectsDirectory"/>, which handles the blank
