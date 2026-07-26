@@ -55,8 +55,22 @@ namespace CodeBrix.Develop.Emulation.FrameBuffer.Transport;
 /// 0 for none; the head tracks modifier state itself from the modifier keys'
 /// down/up, and V1 of the IDE sends no key messages at all — the capability
 /// ships dormant so enabling keyboard forwarding later is an IDE-only
-/// change). There is deliberately NO shutdown message: shutdown IS the socket
-/// closing.
+/// change), and SetOrientation (a = the DEVICE's new orientation as one of the
+/// Orientation* wire values; b and c unused). There is deliberately NO shutdown
+/// message: shutdown IS the socket closing.
+/// </para>
+/// <para>
+/// ORIENTATION — SetOrientation carries the orientation of the DEVICE, not of
+/// the application: how the emulated device is being held. The head works out
+/// what that means for the application itself, honoring
+/// DisplayInformation.AutoRotationPreferences: if the new device orientation is
+/// one the application accepts, it re-lays-out so its UI is right-side-up for
+/// that orientation, otherwise NOTHING changes and it stays as it was (sideways
+/// or upside-down, exactly like a locked application on a turned device). The
+/// value is ABSOLUTE, never a delta, so it is idempotent and re-synchronizes if
+/// anything is ever missed. The IDE sends it immediately after the head's Hello
+/// whenever the emulator window is already rotated, so what the user sees is
+/// what a freshly-launched application gets.
 /// </para>
 /// </summary>
 internal static class FrameBufferEmulatorProtocol
@@ -102,11 +116,22 @@ internal static class FrameBufferEmulatorProtocol
     public const uint TouchReleaseMessage = 18;
     public const uint KeyDownMessage = 32;
     public const uint KeyUpMessage = 33;
+    public const uint SetOrientationMessage = 48;
 
     // Hello capability bits: what the connected head KNOWS HOW to consume, so
     // a newer IDE can tailor what it offers without a head republish.
     public const uint CapabilityKeyboard = 1u << 0;
     public const uint CapabilityTouchPointIds = 1u << 1;
+    public const uint CapabilityRotation = 1u << 2;
+
+    // The device orientations SetOrientation carries, as wire values. They are
+    // the four quarter turns in order, so the distance between two of them IS
+    // the rotation between them; they are deliberately NOT the WinUI
+    // DisplayOrientations flag values, which the IDE cannot reference.
+    public const uint OrientationLandscape = 0;
+    public const uint OrientationPortrait = 1;
+    public const uint OrientationLandscapeFlipped = 2;
+    public const uint OrientationPortraitFlipped = 3;
 
     // The launch-contract environment variable names.
     public const string ShmPathVariable = "CODEBRIX_FBEMU_SHM_PATH";

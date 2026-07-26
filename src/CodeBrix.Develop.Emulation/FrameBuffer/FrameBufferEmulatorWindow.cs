@@ -85,8 +85,11 @@ public sealed class FrameBufferEmulatorWindow : IDisposable
     readonly Gtk.DrawingArea screen;
     readonly Gtk.EventControllerKey keyController;
 
-    readonly int rememberedWidth;
-    readonly int rememberedHeight;
+    readonly int rememberedLongSide;
+    readonly int rememberedShortSide;
+
+    // How far the device has been turned counter-clockwise from resting, 0-3.
+    int quarterTurns;
 
     FrameBufferOrientation orientation = FrameBufferOrientation.Portrait;
     FrameBufferResolutionInfo resolution =
@@ -153,17 +156,86 @@ public sealed class FrameBufferEmulatorWindow : IDisposable
     }
 
     /// <summary>
+    /// Raised after the device has been turned, with its new orientation. The
+    /// caller forwards it to whatever application is running; the window's own
+    /// display has already been updated either way, because how the device is
+    /// being held is not the application's to decide.
+    /// </summary>
+    public event Action<FrameBufferDeviceOrientation>? DeviceOrientationChanged;
+
+    /// <summary>
+    /// How the device is currently being held. It starts in the orientation the
+    /// window was created with — a device sitting at rest — and each
+    /// counter-clockwise turn advances it one quarter.
+    /// </summary>
+    public FrameBufferDeviceOrientation DeviceOrientation =>
+        (FrameBufferDeviceOrientation) ((RestingQuarterTurns + quarterTurns) % 4);
+
+    /// <summary>
+    /// Whether the device has been turned away from the orientation the window
+    /// was created in. At rest there is nothing to tell a starting application:
+    /// how it comes up is its own configuration's business, and saying "the
+    /// device is at rest" would overrule the orientation it asked to start in.
+    /// </summary>
+    public bool IsTurned => quarterTurns != 0;
+
+    /// <summary>
+    /// Turns the device 90° counter-clockwise: reshapes the window to suit and
+    /// rotates what is drawn in it. Available whenever the window is open,
+    /// including with nothing running — a device can be set down the way you want
+    /// it before it is switched on. GTK main thread only.
+    /// </summary>
+    public void RotateCounterClockwise()
+    {
+        ObjectDisposedException.ThrowIf(disposed, this);
+        quarterTurns = (quarterTurns + 1) % 4;
+        if (liveScreen != null)
+        {
+            liveScreen.QuarterTurns = quarterTurns;
+        }
+        ApplyDeviceOrientation();
+        DeviceOrientationChanged?.Invoke(DeviceOrientation);
+    }
+
+    // The device's resting orientation is the panel's own: the window is built to
+    // the resolution and orientation Options chose, so at rest it shows the frame
+    // buffer exactly as it is.
+    int RestingQuarterTurns => orientation == FrameBufferOrientation.Portrait ? 1 : 0;
+
+    // The orientation the SCREEN is currently in: the device's resting
+    // orientation, transposed while the device is turned onto its side. Every
+    // proportion the window works in is taken against this rather than against
+    // the Options orientation, so a turned device snaps and re-fits correctly.
+    FrameBufferOrientation EffectiveOrientation =>
+        quarterTurns % 2 == 0
+            ? orientation
+            : orientation == FrameBufferOrientation.Portrait
+                ? FrameBufferOrientation.Landscape
+                : FrameBufferOrientation.Portrait;
+
+    // The screen keeps the device's proportions, transposed while the device is on
+    // its side; the window follows, keeping the size the user gave it.
+    void ApplyDeviceOrientation()
+    {
+        screenFrame.SetRatio((float) resolution.GetAspectRatio(EffectiveOrientation));
+        (screenWidth, screenHeight) = (screenHeight, screenWidth);
+        ApplySize(screenWidth + HorizontalChrome, screenHeight + VerticalChrome);
+        screen.QueueDraw();
+    }
+
+    /// <summary>
     /// Creates the emulator window for the given application, proportioned to
-    /// the given screen and orientation. The remembered size is the screen
-    /// size persisted from a previous window; pass 0 for either dimension to
-    /// open at the screen's default size.
+    /// the given screen and orientation. The remembered size is the screen size
+    /// persisted from a previous window, held orientation-independently as its
+    /// longer and shorter sides; pass 0 for either to open at the screen's
+    /// default size.
     /// </summary>
     public FrameBufferEmulatorWindow(Gtk.Application application, FrameBufferOrientation orientation,
-        FrameBufferResolution resolution, int rememberedWidth, int rememberedHeight)
+        FrameBufferResolution resolution, int rememberedLongSide, int rememberedShortSide)
     {
         ArgumentNullException.ThrowIfNull(application);
-        this.rememberedWidth = rememberedWidth;
-        this.rememberedHeight = rememberedHeight;
+        this.rememberedLongSide = rememberedLongSide;
+        this.rememberedShortSide = rememberedShortSide;
         this.orientation = orientation;
         this.resolution = FrameBufferResolutionInfo.Get(resolution);
 
@@ -254,8 +326,8 @@ public sealed class FrameBufferEmulatorWindow : IDisposable
 
         // The screen size the window opens at, before it has been laid out.
         screenFrame.SetRatio((float) this.resolution.GetAspectRatio(orientation));
-        (screenWidth, screenHeight) = rememberedWidth > 0 && rememberedHeight > 0
-            ? this.resolution.GetSizeForWidth(rememberedWidth, orientation)
+        (screenWidth, screenHeight) = rememberedLongSide > 0 && rememberedShortSide > 0
+            ? this.resolution.GetSizeForLongSide(rememberedLongSide, orientation)
             : this.resolution.GetDefaultWindowSize(orientation);
         ApplySize(screenWidth + HorizontalChrome, screenHeight + VerticalChrome);
     }
@@ -299,16 +371,19 @@ public sealed class FrameBufferEmulatorWindow : IDisposable
     }
 
     /// <summary>
-    /// The emulated screen's current size, for persisting. False when no size
-    /// is available yet, which is the case before it has ever been shown.
+    /// The emulated screen's current size for persisting, as its longer and
+    /// shorter sides. Orientation-independent by construction, so neither the
+    /// Options orientation nor however far the device happens to be turned right
+    /// now can outlive this window. False when no size is available yet, which is
+    /// the case before it has ever been shown.
     /// </summary>
-    public bool TryGetSize(out int width, out int height)
+    public bool TryGetSize(out int longSide, out int shortSide)
     {
         // Deliberately readable after closing: the Closed handler is exactly
         // where the size gets persisted.
-        width = screenWidth;
-        height = screenHeight;
-        return width > 0 && height > 0;
+        longSide = Math.Max(screenWidth, screenHeight);
+        shortSide = Math.Min(screenWidth, screenHeight);
+        return longSide > 0 && shortSide > 0;
     }
 
     /// <inheritdoc/>
@@ -435,7 +510,7 @@ public sealed class FrameBufferEmulatorWindow : IDisposable
             return;
 
         (screenWidth, screenHeight) = resolution.SnapToAspectRatio(
-            windowWidth - horizontalChrome, windowHeight - verticalChrome, orientation);
+            windowWidth - horizontalChrome, windowHeight - verticalChrome, EffectiveOrientation);
 
         var targetWidth = screenWidth + horizontalChrome;
         var targetHeight = screenHeight + verticalChrome;

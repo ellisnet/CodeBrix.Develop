@@ -88,6 +88,15 @@ internal sealed class FrameBufferScreen : IDisposable
     }
 
     /// <summary>
+    /// How far the device has been turned counter-clockwise from the orientation
+    /// it was created in, in quarter turns (0-3). Applied to every frame drawn and
+    /// undone on every touch reported, UNCONDITIONALLY — whether the application
+    /// honored the turn only decides what is inside the frame, never how the
+    /// device itself is being held. GTK main thread only.
+    /// </summary>
+    public int QuarterTurns { get; set; }
+
+    /// <summary>
     /// Attaches the frames of a running emulated application, or detaches with
     /// null — power off — which blanks the screen. GTK main thread only.
     /// </summary>
@@ -145,12 +154,27 @@ internal sealed class FrameBufferScreen : IDisposable
         screen.AddController(rightClick);
     }
 
-    // Window pixels -> device pixels. One uniform scale, no letterbox offset,
-    // because the canvas IS the screen; clamped so the screen's far edges land
-    // on the last device pixel rather than one past it.
-    (int X, int Y) ToDevice(double x, double y) => (
-        Math.Clamp((int) Math.Round(x * deviceWidth / Math.Max(1, presentWidth)), 0, deviceWidth - 1),
-        Math.Clamp((int) Math.Round(y * deviceHeight / Math.Max(1, presentHeight)), 0, deviceHeight - 1));
+    // Window pixels -> device pixels: the exact inverse of the transform OnDraw
+    // applies, so a finger always lands on the frame-buffer pixel it is pointing
+    // at however the device is turned. No letterbox offset, because the canvas IS
+    // the screen; clamped so the far edges land on the last device pixel rather
+    // than one past it.
+    (int X, int Y) ToDevice(double x, double y)
+    {
+        var width = (double) Math.Max(1, presentWidth);
+        var height = (double) Math.Max(1, presentHeight);
+        // Normalized position within the UNROTATED frame.
+        var (normalizedX, normalizedY) = QuarterTurns switch
+        {
+            1 => ((height - y) / height, x / width),
+            2 => ((width - x) / width, (height - y) / height),
+            3 => (y / height, (width - x) / width),
+            _ => (x / width, y / height),
+        };
+        return (
+            Math.Clamp((int) Math.Round(normalizedX * deviceWidth), 0, deviceWidth - 1),
+            Math.Clamp((int) Math.Round(normalizedY * deviceHeight), 0, deviceHeight - 1));
+    }
 
     void OnDraw(Gtk.DrawingArea area, Cairo.Context cr, int width, int height)
     {
@@ -184,8 +208,23 @@ internal sealed class FrameBufferScreen : IDisposable
             if (hasFrame)
             {
                 using var frame = SKImage.FromPixels(deviceInfo, deviceBitmap.GetPixels(), deviceBitmap.RowBytes);
-                canvas.DrawImage(frame, SKRect.Create(0, 0, width, height),
+                // Turning the device turns what is on it. The frame buffer never
+                // changes shape, so an odd number of quarter turns draws it into a
+                // transposed rectangle — which is exactly the canvas's shape,
+                // because the window was reshaped to match.
+                var (degrees, translateX, translateY, targetWidth, targetHeight) = QuarterTurns switch
+                {
+                    1 => (-90f, 0f, (float) height, height, width),
+                    2 => (180f, (float) width, (float) height, width, height),
+                    3 => (90f, (float) width, 0f, height, width),
+                    _ => (0f, 0f, 0f, width, height),
+                };
+                canvas.Save();
+                canvas.Translate(translateX, translateY);
+                canvas.RotateDegrees(degrees);
+                canvas.DrawImage(frame, SKRect.Create(0, 0, targetWidth, targetHeight),
                     new SKSamplingOptions(SKFilterMode.Linear, SKMipmapMode.None));
+                canvas.Restore();
             }
             canvas.Flush();
             presentSurface.MarkDirty();

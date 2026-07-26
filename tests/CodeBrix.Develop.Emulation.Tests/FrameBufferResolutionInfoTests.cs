@@ -103,15 +103,32 @@ public class FrameBufferResolutionInfoTests
     }
 
     [Fact]
-    public void Size_for_width_keeps_the_width_and_takes_the_height_from_the_screen()
+    public void Size_for_long_side_keeps_it_and_takes_the_other_from_the_screen()
     {
-        //Act — a remembered 500-wide window re-fitted to a portrait 720 x 1280.
+        //Act — a remembered 889-long window re-fitted to a portrait 720 x 1280.
         var size = FrameBufferResolutionInfo.Get(FrameBufferResolution.SevenInch720x1280)
-            .GetSizeForWidth(500, FrameBufferOrientation.Portrait);
+            .GetSizeForLongSide(889, FrameBufferOrientation.Portrait);
 
         //Assert
-        size.Width.Should().Be(500);
-        size.Height.Should().Be(889); // 500 * 1280 / 720, rounded
+        size.Width.Should().Be(500); // 889 * 720 / 1280, rounded
+        size.Height.Should().Be(889);
+    }
+
+    [Fact]
+    public void Size_for_long_side_transposes_exactly_when_the_orientation_flips()
+    {
+        //Arrange
+        var screen = FrameBufferResolutionInfo.Get(FrameBufferResolution.SevenInch720x1280);
+
+        //Act
+        var portrait = screen.GetSizeForLongSide(889, FrameBufferOrientation.Portrait);
+        var landscape = screen.GetSizeForLongSide(889, FrameBufferOrientation.Landscape);
+
+        //Assert — the same window, turned. This is the property that keeps a
+        //remembered size from carrying an orientation into the next window,
+        //whether the change came from Options or from a rotated emulator.
+        landscape.Width.Should().Be(portrait.Height);
+        landscape.Height.Should().Be(portrait.Width);
     }
 
     [Fact]

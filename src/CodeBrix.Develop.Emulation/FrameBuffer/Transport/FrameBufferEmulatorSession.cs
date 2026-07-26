@@ -208,6 +208,45 @@ public sealed class FrameBufferEmulatorSession : IFrameBufferFrameSource, IDispo
     }
 
     /// <summary>
+    /// Whether the connected head consumes orientation messages (it declared the
+    /// rotation capability in its Hello). False before the head has connected,
+    /// and false for a head built before rotation support existed — the IDE
+    /// disables its rotate button rather than offer one that does nothing.
+    /// </summary>
+    public bool SupportsRotation =>
+        (headCapabilities & FrameBufferEmulatorProtocol.CapabilityRotation) != 0;
+
+    /// <summary>
+    /// Tells the app the DEVICE has been turned to <paramref name="orientation"/>.
+    /// Absolute, never a delta, so re-sending the current orientation is harmless
+    /// and re-synchronizes anything missed. The app decides for itself whether to
+    /// honor it; nothing comes back either way, and the IDE's own display does not
+    /// depend on the answer.
+    /// </summary>
+    public void SendOrientation(FrameBufferDeviceOrientation orientation)
+    {
+        if (disposed || !connected || client is not { } connection)
+            return;
+
+        Span<byte> message = stackalloc byte[FrameBufferEmulatorProtocol.MessageSize];
+        FrameBufferEmulatorProtocol.WriteMessage(message,
+            FrameBufferEmulatorProtocol.SetOrientationMessage, (uint) orientation, 0, 0);
+        lock (sendLock)
+        {
+            try
+            {
+                connection.Send(message);
+            }
+            catch (SocketException)
+            {
+            }
+            catch (ObjectDisposedException)
+            {
+            }
+        }
+    }
+
+    /// <summary>
     /// Sends one key transition to the app: the WinUI virtual key, the
     /// X11-style hardware keycode (evdev scancode + 8) and the Unicode
     /// codepoint (0 for none). DORMANT in V1 — nothing in the IDE calls this

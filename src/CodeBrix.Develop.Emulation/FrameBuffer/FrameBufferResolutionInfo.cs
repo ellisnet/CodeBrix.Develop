@@ -134,12 +134,22 @@ public sealed class FrameBufferResolutionInfo
             : Clamp(DefaultWindowLongSide, Scale(DefaultWindowLongSide, ShortSide, LongSide), orientation);
 
     /// <summary>
-    /// The window size keeping the given width and taking the height from
-    /// this screen's proportions — how a remembered size is re-fitted when
-    /// the window reopens against a different screen or orientation.
+    /// The window size keeping the given LONGER side and taking the other from
+    /// this screen's proportions — how a remembered size is re-fitted when the
+    /// window reopens against a different screen or orientation. The long side
+    /// is the one kept because it is what
+    /// <see cref="GetDefaultWindowSize"/> is defined in terms of, and because
+    /// an orientation change is then an exact round trip: the same window,
+    /// transposed. When the SCREEN changes too the proportions differ, so only
+    /// one side can survive.
     /// </summary>
-    public (int Width, int Height) GetSizeForWidth(int width, FrameBufferOrientation orientation) =>
-        Clamp(width, Scale(width, GetHeight(orientation), GetWidth(orientation)), orientation);
+    public (int Width, int Height) GetSizeForLongSide(int longSide, FrameBufferOrientation orientation)
+    {
+        var shortSide = Scale(longSide, ShortSide, LongSide);
+        return orientation == FrameBufferOrientation.Portrait
+            ? Clamp(shortSide, longSide, orientation)
+            : Clamp(longSide, shortSide, orientation);
+    }
 
     /// <summary>
     /// The nearest size to the one requested that matches this screen's

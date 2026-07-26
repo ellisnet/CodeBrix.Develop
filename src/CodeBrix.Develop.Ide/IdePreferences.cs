@@ -119,19 +119,39 @@ public static class IdePreferences
         ConfigurationProperty.Create("CodeBrix.Develop.Ide.FrameBuffer.HardwareKeyboard", false);
 
     /// <summary>
-    /// The remembered width of the frame-buffer emulator's screen area (the
-    /// window is this plus its bezel); 0 until it has been shown once. Its
-    /// POSITION is deliberately absent: GTK 4 has no window-positioning API,
-    /// so a window's place on screen can neither be read nor restored (which
-    /// also means a remembered emulator can never come back off-screen).
+    /// The remembered LONGER side of the frame-buffer emulator's screen area (the
+    /// window is this plus its bezel); 0 until it has been shown once. Stored
+    /// orientation-independently as a long and a short side — the same way
+    /// FrameBufferResolutionInfo stores the device — so that neither an Options
+    /// orientation change nor a rotated emulator window can carry an orientation
+    /// into the next window: taking the longer and shorter sides IS the
+    /// normalization. Its POSITION is deliberately absent: GTK 4 has no
+    /// window-positioning API, so a window's place on screen can neither be read
+    /// nor restored (which also means a remembered emulator can never come back
+    /// off-screen).
     /// </summary>
-    public static readonly ConfigurationProperty<int> FrameBufferWindowWidth =
-        ConfigurationProperty.Create("CodeBrix.Develop.Ide.FrameBuffer.Window.Width", 0);
+    public static readonly ConfigurationProperty<int> FrameBufferWindowLongSide =
+        ConfigurationProperty.Create("CodeBrix.Develop.Ide.FrameBuffer.Window.LongSide", 0);
 
     /// <summary>
-    /// The remembered height of the frame-buffer emulator's screen area;
+    /// The remembered SHORTER side of the frame-buffer emulator's screen area;
     /// 0 until it has been shown once.
     /// </summary>
-    public static readonly ConfigurationProperty<int> FrameBufferWindowHeight =
+    public static readonly ConfigurationProperty<int> FrameBufferWindowShortSide =
+        ConfigurationProperty.Create("CodeBrix.Develop.Ide.FrameBuffer.Window.ShortSide", 0);
+
+    /// <summary>
+    /// The width/height pair the emulator's size used to be stored as, kept only
+    /// to seed <see cref="FrameBufferWindowLongSide"/> and
+    /// <see cref="FrameBufferWindowShortSide"/> the first time an older stored
+    /// size is read. Taking the larger and smaller of the two is correct for
+    /// every value ever written under the old scheme, so nobody loses a
+    /// remembered size.
+    /// </summary>
+    public static readonly ConfigurationProperty<int> FrameBufferWindowLegacyWidth =
+        ConfigurationProperty.Create("CodeBrix.Develop.Ide.FrameBuffer.Window.Width", 0);
+
+    /// <inheritdoc cref="FrameBufferWindowLegacyWidth"/>
+    public static readonly ConfigurationProperty<int> FrameBufferWindowLegacyHeight =
         ConfigurationProperty.Create("CodeBrix.Develop.Ide.FrameBuffer.Window.Height", 0);
 }

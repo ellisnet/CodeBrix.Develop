@@ -79,7 +79,7 @@ public class Workbench
 
     Gio.SimpleAction? buildAction, rebuildAction, cleanAction, runAction, stopAction, closeSolutionAction;
     Gio.SimpleAction? debugAction, stepOverAction, stepIntoAction, stepOutAction;
-    Gio.SimpleAction? updateCodeBrixPackagesAction, closeEmulatorAction;
+    Gio.SimpleAction? updateCodeBrixPackagesAction, closeEmulatorAction, rotateEmulatorAction;
     Gio.SimpleAction? openSolutionFolderAction, openSolutionTerminalAction;
     Gio.SimpleAction? runAllTestsAction, runSelectedTestsAction, debugSelectedTestAction;
     Gio.SimpleAction? runTestAtCaretAction, debugTestAtCaretAction, rediscoverTestsAction;
@@ -285,8 +285,10 @@ public class Workbench
         toolbar.Append(ToolButton("bug-16", "app.debug", "Start Debugging / Continue (F5)"));
         toolbar.Append(ToolButton("stop-16", "app.stop", "Stop (Shift+F5)"));
         toolbar.Append(ToolbarGroupSpace());
-        // A group of its own: the emulator is only ever there to be closed
-        // while one is open, so the button spends most of its life disabled.
+        // A group of its own: the emulator's two buttons spend most of their life
+        // disabled, because most of the time there is no emulator open to act on.
+        toolbar.Append(ToolButton("undo-16", "app.rotate-emulator",
+            "Rotate Emulator 90° Counter-Clockwise"));
         toolbar.Append(ToolButton("close-solution-16", "app.close-emulator", "Close Emulator"));
         toolbar.Append(ToolbarGroupSpace());
         toolbar.Append(ToolButton("step-over-16", "app.step-over", "Step Over (F10)"));
@@ -381,6 +383,7 @@ public class Workbench
         AddAction("complete", () => documentManager.ActiveDocument?.ShowCompletion(), "<Control>space");
         updateCodeBrixPackagesAction = AddAction("update-codebrix-packages", () => _ = UpdateCodeBrixPackagesAsync(), null, enabled: false);
         closeEmulatorAction = AddAction("close-emulator", () => frameBufferEmulator?.Close(), null, enabled: false);
+        rotateEmulatorAction = AddAction("rotate-emulator", RotateFrameBufferEmulator, null, enabled: false);
         openSolutionFolderAction = AddAction("open-solution-folder", OpenSolutionFolder, "<Control><Shift>o", enabled: false);
         // Not Ctrl+Shift+T — Run Test at Caret has it. Ctrl+` is the
         // "show me a terminal" binding editors have taught everyone.
@@ -1201,11 +1204,16 @@ public class Workbench
             // The orientation and resolution are read HERE, when the window is
             // created — an Options change applies to the next emulator window,
             // not to one already open.
+            var (rememberedLongSide, rememberedShortSide) = RememberedEmulatorSize();
             frameBufferEmulator = new FrameBufferEmulatorWindow(application,
                 IdePreferences.FrameBufferScreenOrientation.Value,
                 IdePreferences.FrameBufferScreenResolution.Value,
-                IdePreferences.FrameBufferWindowWidth, IdePreferences.FrameBufferWindowHeight);
+                rememberedLongSide, rememberedShortSide);
             frameBufferEmulator.Closed += (_, _) => OnFrameBufferEmulatorClosed();
+            // Turning the device is the IDE's business; telling the app is a
+            // courtesy it may decline, and the window has already turned either way.
+            frameBufferEmulator.DeviceOrientationChanged += orientation =>
+                frameBufferSession?.SendOrientation(orientation);
             // Touches (device pixels) go to whatever app is currently live;
             // with no session the finger presses a powered-off screen.
             frameBufferEmulator.Touch += (kind, x, y) => frameBufferSession?.SendTouch(kind, x, y);
@@ -1213,6 +1221,7 @@ public class Workbench
             // device has one.
             frameBufferEmulator.KeyHandler = ForwardEmulatedKey;
             closeEmulatorAction?.SetEnabled(true);
+            rotateEmulatorAction?.SetEnabled(true);
         }
 
         // Present raises an already-open window to the front without moving it.
@@ -1287,8 +1296,7 @@ public class Workbench
             ShowStatus($"Running {project.Name} in the Frame Buffer emulator…");
 
             session = new FrameBufferEmulatorSession(device.Width, device.Height);
-            frameBufferSession = session;
-            frameBufferEmulator!.SetFrameSource(session);
+            AttachFrameBufferSession(session);
 
             using var killCts = new CancellationTokenSource();
             var capturedSession = session;
@@ -1336,8 +1344,7 @@ public class Workbench
         var session = new FrameBufferEmulatorSession(device.Width, device.Height);
         try
         {
-            frameBufferSession = session;
-            frameBufferEmulator!.SetFrameSource(session);
+            AttachFrameBufferSession(session);
             await DebugService.StartAsync(project, environment: session.EnvironmentVariables);
             stopAction?.SetEnabled(true);
             // The session is cleaned up in OnDebugEnded, whichever way the
@@ -1413,6 +1420,7 @@ public class Workbench
         SaveFrameBufferEmulatorSize();
         frameBufferEmulator = null;
         closeEmulatorAction?.SetEnabled(false);
+        rotateEmulatorAction?.SetEnabled(false);
         // Closing the emulator with an app running terminates the app — the
         // user unplugged the device.
         if (frameBufferEmulationRunning)
@@ -1437,12 +1445,66 @@ public class Workbench
         debugAction?.SetEnabled(canLaunch);
     }
 
+    // The remembered emulator size, seeding the orientation-independent keys from
+    // the width/height pair they replaced the first time an older stored size is
+    // read. Taking the larger and smaller is correct for every value the old
+    // scheme ever wrote, so nobody loses a remembered size.
+    static (int LongSide, int ShortSide) RememberedEmulatorSize()
+    {
+        var longSide = IdePreferences.FrameBufferWindowLongSide.Value;
+        var shortSide = IdePreferences.FrameBufferWindowShortSide.Value;
+        if (longSide > 0 && shortSide > 0)
+            return (longSide, shortSide);
+        var legacyWidth = IdePreferences.FrameBufferWindowLegacyWidth.Value;
+        var legacyHeight = IdePreferences.FrameBufferWindowLegacyHeight.Value;
+        return legacyWidth > 0 && legacyHeight > 0
+            ? (Math.Max(legacyWidth, legacyHeight), Math.Min(legacyWidth, legacyHeight))
+            : (0, 0);
+    }
+
+    // Attaches a freshly-created session to the emulator. The device may already
+    // have been TURNED before anything was running, and an application starting
+    // onto a turned device should come up the way the device is being held.
+    //
+    // Only when it has actually been turned, though. At rest this must stay
+    // silent: how an application comes up is its own configuration's business
+    // (fb.Orientation, and isPreferredOrientation in particular), and reporting
+    // the resting orientation would overrule that within milliseconds of launch
+    // for any application that accepts the resting orientation — which is every
+    // application that has not narrowed AutoRotationEnabled.
+    void AttachFrameBufferSession(FrameBufferEmulatorSession session)
+    {
+        frameBufferSession = session;
+        session.Connected += () =>
+        {
+            if (frameBufferEmulator is { IsTurned: true } emulator)
+                session.SendOrientation(emulator.DeviceOrientation);
+        };
+        frameBufferEmulator!.SetFrameSource(session);
+    }
+
     void SaveFrameBufferEmulatorSize()
     {
-        if (frameBufferEmulator == null || !frameBufferEmulator.TryGetSize(out var width, out var height))
+        if (frameBufferEmulator == null
+            || !frameBufferEmulator.TryGetSize(out var longSide, out var shortSide))
             return;
-        IdePreferences.FrameBufferWindowWidth.Value = width;
-        IdePreferences.FrameBufferWindowHeight.Value = height;
+        IdePreferences.FrameBufferWindowLongSide.Value = longSide;
+        IdePreferences.FrameBufferWindowShortSide.Value = shortSide;
+    }
+
+    // Turns the emulated device a quarter turn counter-clockwise. Available
+    // whenever the window is open, running or not: a device can be set down the
+    // way you want it before it is switched on, and the orientation is handed to
+    // the application when one starts.
+    void RotateFrameBufferEmulator()
+    {
+        if (frameBufferEmulator is not { } emulator)
+            return;
+        emulator.RotateCounterClockwise();
+        var orientation = emulator.DeviceOrientation;
+        ShowStatus(frameBufferSession is { IsConnected: true, SupportsRotation: false }
+            ? $"Emulator turned to {orientation} — this application's head does not accept rotation"
+            : $"Emulator turned to {orientation}");
     }
 
     // Stop stays available while the emulator is running even though no
