@@ -29,6 +29,16 @@ namespace CodeBrix.Develop.Emulation.FrameBuffer.Transport;
 /// Unix stream socket), CODEBRIX_FBEMU_WIDTH and CODEBRIX_FBEMU_HEIGHT (device
 /// pixels, decimal strings). The head asserts the env resolution matches the
 /// shared-memory header and hard-fails on mismatch (resolution lockstep).
+/// CODEBRIX_FBEMU_LANGUAGE carries the emulated device's system language as one
+/// of the software keyboard's layout ids ("de", "fr-CH", "sr-Latn"…), or the
+/// literal "system-default" to follow the host's own language. The IDE always
+/// sets it — "system-default" is sent explicitly, so an ABSENT variable means an
+/// IDE that predates the setting, which the head treats the same as the default.
+/// It is read ONCE at startup and never changes for the process's life: the
+/// environment is fixed at launch, so a language change in the IDE takes effect
+/// the next time the emulator opens. There is no lockstep check for it — an
+/// empty or unrecognized value falls back to the host language rather than
+/// failing the launch.
 /// </para>
 /// <para>
 /// SHARED MEMORY — a 64-byte little-endian header (field offsets below), then
@@ -138,6 +148,13 @@ internal static class FrameBufferEmulatorProtocol
     public const string SocketPathVariable = "CODEBRIX_FBEMU_SOCKET_PATH";
     public const string WidthVariable = "CODEBRIX_FBEMU_WIDTH";
     public const string HeightVariable = "CODEBRIX_FBEMU_HEIGHT";
+    public const string LanguageVariable = "CODEBRIX_FBEMU_LANGUAGE";
+
+    /// <summary>
+    /// The <see cref="LanguageVariable"/> value meaning "follow the host's own
+    /// language" — what the IDE sends until the user picks a specific language.
+    /// </summary>
+    public const string SystemDefaultLanguage = "system-default";
 
     /// <summary>
     /// Computes the layout of the shared-memory file for a device resolution:

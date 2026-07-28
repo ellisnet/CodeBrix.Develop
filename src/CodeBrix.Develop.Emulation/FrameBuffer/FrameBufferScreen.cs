@@ -55,6 +55,19 @@ internal sealed class FrameBufferScreen : IDisposable
     int lastSentX = -1;
     int lastSentY = -1;
 
+    // The gesture's own start point, captured at drag-begin. GestureDrag's
+    // GetStartPoint() only answers while the gesture is still active, and at
+    // drag-end it can already have been reset — so asking it there is a path
+    // that silently drops the finger-up. Remembering it costs two ints.
+    double dragStartX;
+    double dragStartY;
+
+    // True between a Press we sent and its Release. Guarantees exactly one
+    // Release per Press: a head that never sees the finger lift keeps the
+    // pointer captured by whatever was pressed, so every later tap is re-routed
+    // to that stale target instead of what the user actually touched.
+    bool touchDown;
+
     /// <summary>
     /// Raised on the GTK main thread for each touch, in DEVICE pixels:
     /// press, move (only while pressed), release.
@@ -120,29 +133,38 @@ internal sealed class FrameBufferScreen : IDisposable
         drag.OnDragBegin += (sender, args) =>
         {
             sender.SetState(Gtk.EventSequenceState.Claimed);
+            // A begin without an end for the previous gesture would leave the
+            // device holding a finger down; lift it before pressing again.
+            ReleaseTouch(lastSentX, lastSentY);
+            dragStartX = args.StartX;
+            dragStartY = args.StartY;
             var (x, y) = ToDevice(args.StartX, args.StartY);
             lastSentX = x;
             lastSentY = y;
+            touchDown = true;
             Touch?.Invoke(FrameBufferTouchKind.Press, x, y);
         };
-        drag.OnDragUpdate += (sender, args) =>
+        drag.OnDragUpdate += (_, args) =>
         {
-            if (!sender.GetStartPoint(out var startX, out var startY))
+            if (!touchDown)
                 return;
-            var (x, y) = ToDevice(startX + args.OffsetX, startY + args.OffsetY);
+            var (x, y) = ToDevice(dragStartX + args.OffsetX, dragStartY + args.OffsetY);
             if (x == lastSentX && y == lastSentY)
                 return;
             lastSentX = x;
             lastSentY = y;
             Touch?.Invoke(FrameBufferTouchKind.Move, x, y);
         };
-        drag.OnDragEnd += (sender, args) =>
+        drag.OnDragEnd += (_, args) =>
         {
-            if (!sender.GetStartPoint(out var startX, out var startY))
-                return;
-            var (x, y) = ToDevice(startX + args.OffsetX, startY + args.OffsetY);
-            Touch?.Invoke(FrameBufferTouchKind.Release, x, y);
+            var (x, y) = ToDevice(dragStartX + args.OffsetX, dragStartY + args.OffsetY);
+            ReleaseTouch(x, y);
         };
+        // A gesture can also END without drag-end: another widget claiming the
+        // sequence, the pointer leaving, the window losing the grab. Every one
+        // of those must still lift the finger, at wherever it last was.
+        drag.OnCancel += (_, _) => ReleaseTouch(lastSentX, lastSentY);
+        drag.OnEnd += (_, _) => ReleaseTouch(lastSentX, lastSentY);
         screen.AddController(drag);
 
         // Right button: claimed and discarded — on the emulated device it does
@@ -152,6 +174,17 @@ internal sealed class FrameBufferScreen : IDisposable
         rightClick.SetPropagationPhase(Gtk.PropagationPhase.Capture);
         rightClick.OnPressed += (sender, _) => sender.SetState(Gtk.EventSequenceState.Claimed);
         screen.AddController(rightClick);
+    }
+
+    // Sends Release exactly once per Press, from whichever path first notices
+    // the gesture is over. Doing nothing when no finger is down is what makes
+    // it safe to call from all of them.
+    void ReleaseTouch(int x, int y)
+    {
+        if (!touchDown)
+            return;
+        touchDown = false;
+        Touch?.Invoke(FrameBufferTouchKind.Release, x, y);
     }
 
     // Window pixels -> device pixels: the exact inverse of the transform OnDraw

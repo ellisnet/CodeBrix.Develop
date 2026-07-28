@@ -67,6 +67,54 @@ public class FrameBufferEmulatorSessionTests
     }
 
     [Fact]
+    public void The_system_language_is_sent_explicitly_when_it_is_the_default()
+    {
+        //Arrange — the IDE always sets the variable, so an ABSENT one means an
+        //IDE from before the setting existed rather than "follow the host".
+        using var session = new FrameBufferEmulatorSession(Width, Height);
+
+        //Act
+        var variables = session.EnvironmentVariables;
+
+        //Assert
+        session.SystemLanguage.Should().Be("system-default");
+        variables[FrameBufferEmulatorProtocol.LanguageVariable].Should().Be("system-default");
+    }
+
+    [Theory]
+    [InlineData("de")]
+    [InlineData("fr-CH")]
+    [InlineData("sr-Latn")]
+    public void A_chosen_system_language_reaches_the_launch_contract(string language)
+    {
+        //Arrange
+        using var session = new FrameBufferEmulatorSession(Width, Height, language);
+
+        //Act
+        var variables = session.EnvironmentVariables;
+
+        //Assert
+        session.SystemLanguage.Should().Be(language);
+        variables[FrameBufferEmulatorProtocol.LanguageVariable].Should().Be(language);
+    }
+
+    [Theory]
+    [InlineData(null)]
+    [InlineData("")]
+    [InlineData("   ")]
+    public void A_blank_system_language_is_normalized_to_the_default(string language)
+    {
+        //Arrange
+        using var session = new FrameBufferEmulatorSession(Width, Height, language);
+
+        //Act
+        var variables = session.EnvironmentVariables;
+
+        //Assert
+        variables[FrameBufferEmulatorProtocol.LanguageVariable].Should().Be("system-default");
+    }
+
+    [Fact]
     public async Task A_frame_published_by_the_app_reaches_the_frame_source()
     {
         //Arrange

@@ -112,6 +112,16 @@ public static class IdePreferences
             FrameBufferResolution.SevenInch720x1280);
 
     /// <summary>
+    /// The system language of the emulated frame-buffer device, as one of the
+    /// codes in <see cref="FrameBufferLanguageInfo.All"/> —
+    /// <see cref="FrameBufferLanguageInfo.SystemDefaultCode"/> (the default)
+    /// to follow the host's own language. Stored only — nothing reads it yet.
+    /// </summary>
+    public static readonly ConfigurationProperty<string> FrameBufferSystemLanguage =
+        ConfigurationProperty.Create("CodeBrix.Develop.Ide.FrameBuffer.SystemLanguage",
+            FrameBufferLanguageInfo.SystemDefaultCode);
+
+    /// <summary>
     /// Whether the emulated frame-buffer device has a hardware keyboard.
     /// Stored only — nothing reads it yet.
     /// </summary>

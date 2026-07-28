@@ -12,16 +12,17 @@ using Gtk = CodeBrix.Develop.UI.Gtk;
 namespace CodeBrix.Develop.Ide.Gui.Options;
 
 /// <summary>
-/// The Frame Buffer options page: the orientation and screen of the emulated
-/// device a Linux Frame Buffer head is run and debugged against, and whether
-/// that device has a hardware keyboard. Changing the orientation relabels the
-/// resolution list in place, so the chosen screen carries over to its
-/// counterpart in the new orientation.
+/// The Frame Buffer options page: the orientation, screen and system language
+/// of the emulated device a Linux Frame Buffer head is run and debugged
+/// against, and whether that device has a hardware keyboard. Changing the
+/// orientation relabels the resolution list in place, so the chosen screen
+/// carries over to its counterpart in the new orientation.
 /// </summary>
 public class FrameBufferOptionsPanel : OptionsPanel
 {
     Gtk.DropDown? orientationDropDown;
     Gtk.DropDown? resolutionDropDown;
+    Gtk.DropDown? languageDropDown;
     Gtk.CheckButton? hardwareKeyboardCheck;
     FrameBufferOrientation orientation;
 
@@ -56,6 +57,15 @@ public class FrameBufferOptionsPanel : OptionsPanel
         resolutionDropDown.SetSelected(
             (uint) FrameBufferResolutionInfo.IndexOf(IdePreferences.FrameBufferScreenResolution.Value));
 
+        var languageLabel = Gtk.Label.New("Emulator system language:");
+        languageLabel.SetXalign(0);
+        languageLabel.SetMarginTop(6);
+
+        languageDropDown = Gtk.DropDown.NewFromStrings(FrameBufferLanguageInfo.Labels.ToArray());
+        languageDropDown.SetHalign(Gtk.Align.Start);
+        languageDropDown.SetSelected(
+            (uint) FrameBufferLanguageInfo.IndexOf(IdePreferences.FrameBufferSystemLanguage.Value));
+
         hardwareKeyboardCheck = Gtk.CheckButton.NewWithLabel("Hardware keyboard support");
         hardwareKeyboardCheck.SetActive(IdePreferences.FrameBufferHardwareKeyboard.Value);
         hardwareKeyboardCheck.SetMarginTop(10);
@@ -87,6 +97,8 @@ public class FrameBufferOptionsPanel : OptionsPanel
         box.Append(orientationDropDown);
         box.Append(resolutionLabel);
         box.Append(resolutionDropDown);
+        box.Append(languageLabel);
+        box.Append(languageDropDown);
         box.Append(hardwareKeyboardCheck);
         box.Append(description);
         return box;
@@ -96,6 +108,7 @@ public class FrameBufferOptionsPanel : OptionsPanel
     public override bool HasUnsavedChanges() =>
         SelectedOrientation != IdePreferences.FrameBufferScreenOrientation.Value ||
         SelectedResolution != IdePreferences.FrameBufferScreenResolution.Value ||
+        SelectedLanguage != IdePreferences.FrameBufferSystemLanguage.Value ||
         SelectedHardwareKeyboard != IdePreferences.FrameBufferHardwareKeyboard.Value;
 
     /// <inheritdoc/>
@@ -103,6 +116,7 @@ public class FrameBufferOptionsPanel : OptionsPanel
     {
         IdePreferences.FrameBufferScreenOrientation.Value = SelectedOrientation;
         IdePreferences.FrameBufferScreenResolution.Value = SelectedResolution;
+        IdePreferences.FrameBufferSystemLanguage.Value = SelectedLanguage;
         IdePreferences.FrameBufferHardwareKeyboard.Value = SelectedHardwareKeyboard;
     }
 
@@ -113,6 +127,10 @@ public class FrameBufferOptionsPanel : OptionsPanel
     FrameBufferResolution SelectedResolution => resolutionDropDown == null
         ? IdePreferences.FrameBufferScreenResolution.Value
         : FrameBufferResolutionInfo.FromIndex((int) resolutionDropDown.GetSelected()).Resolution;
+
+    string SelectedLanguage => languageDropDown == null
+        ? IdePreferences.FrameBufferSystemLanguage.Value
+        : FrameBufferLanguageInfo.FromIndex((int) languageDropDown.GetSelected()).Code;
 
     bool SelectedHardwareKeyboard => hardwareKeyboardCheck?.GetActive()
         ?? IdePreferences.FrameBufferHardwareKeyboard.Value;

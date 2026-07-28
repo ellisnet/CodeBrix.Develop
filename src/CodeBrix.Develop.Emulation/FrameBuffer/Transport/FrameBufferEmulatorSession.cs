@@ -49,6 +49,7 @@ public sealed class FrameBufferEmulatorSession : IFrameBufferFrameSource, IDispo
     readonly int slot0Offset;
     readonly int slot1Offset;
 
+    readonly string systemLanguage;
     readonly string sessionDirectory;
     readonly string shmPath;
     readonly string socketPath;
@@ -95,11 +96,22 @@ public sealed class FrameBufferEmulatorSession : IFrameBufferFrameSource, IDispo
     /// Creates the transport for one emulated app launch: the shared-memory
     /// file (header written, slots zeroed) and the listening socket, both in a
     /// fresh per-session directory under XDG_RUNTIME_DIR.
+    /// <para>
+    /// <paramref name="systemLanguage"/> is the emulated device's system
+    /// language, captured HERE — once per launch — because the launch contract
+    /// travels in the environment, which is fixed when the app process starts.
+    /// A language change in Options therefore applies to the next emulator that
+    /// opens, never to one already running. Blank is normalized to
+    /// "system-default" so the variable is always sent explicitly.
+    /// </para>
     /// </summary>
-    public FrameBufferEmulatorSession(int deviceWidth, int deviceHeight)
+    public FrameBufferEmulatorSession(int deviceWidth, int deviceHeight, string? systemLanguage = null)
     {
         ArgumentOutOfRangeException.ThrowIfLessThanOrEqual(deviceWidth, 0);
         ArgumentOutOfRangeException.ThrowIfLessThanOrEqual(deviceHeight, 0);
+        this.systemLanguage = string.IsNullOrWhiteSpace(systemLanguage)
+            ? FrameBufferEmulatorProtocol.SystemDefaultLanguage
+            : systemLanguage;
         this.deviceWidth = deviceWidth;
         this.deviceHeight = deviceHeight;
         frameBytes = deviceWidth * 4 * deviceHeight;
@@ -151,7 +163,14 @@ public sealed class FrameBufferEmulatorSession : IFrameBufferFrameSource, IDispo
                 deviceWidth.ToString(CultureInfo.InvariantCulture),
             [FrameBufferEmulatorProtocol.HeightVariable] =
                 deviceHeight.ToString(CultureInfo.InvariantCulture),
+            [FrameBufferEmulatorProtocol.LanguageVariable] = systemLanguage,
         };
+
+    /// <summary>
+    /// The emulated device's system language for this launch — a layout id, or
+    /// "system-default" to follow the host. Fixed for the session's life.
+    /// </summary>
+    public string SystemLanguage => systemLanguage;
 
     /// <summary>True while the app is connected and past its handshake.</summary>
     public bool IsConnected => connected;
