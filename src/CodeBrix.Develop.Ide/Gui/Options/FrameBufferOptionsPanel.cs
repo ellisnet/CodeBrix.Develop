@@ -14,15 +14,17 @@ namespace CodeBrix.Develop.Ide.Gui.Options;
 /// <summary>
 /// The Frame Buffer options page: the orientation, screen and system language
 /// of the emulated device a Linux Frame Buffer head is run and debugged
-/// against, and whether that device has a hardware keyboard. Changing the
-/// orientation relabels the resolution list in place, so the chosen screen
-/// carries over to its counterpart in the new orientation.
+/// against, whether the application is confined to its own fonts, and whether
+/// that device has a hardware keyboard. Changing the orientation relabels the
+/// resolution list in place, so the chosen screen carries over to its
+/// counterpart in the new orientation.
 /// </summary>
 public class FrameBufferOptionsPanel : OptionsPanel
 {
     Gtk.DropDown? orientationDropDown;
     Gtk.DropDown? resolutionDropDown;
     Gtk.DropDown? languageDropDown;
+    Gtk.CheckButton? fontIsolationCheck;
     Gtk.CheckButton? hardwareKeyboardCheck;
     FrameBufferOrientation orientation;
 
@@ -66,9 +68,13 @@ public class FrameBufferOptionsPanel : OptionsPanel
         languageDropDown.SetSelected(
             (uint) FrameBufferLanguageInfo.IndexOf(IdePreferences.FrameBufferSystemLanguage.Value));
 
+        fontIsolationCheck = Gtk.CheckButton.NewWithLabel("Emulator font isolation");
+        fontIsolationCheck.SetActive(IdePreferences.FrameBufferFontIsolation.Value);
+        fontIsolationCheck.SetMarginTop(10);
+
         hardwareKeyboardCheck = Gtk.CheckButton.NewWithLabel("Hardware keyboard support");
         hardwareKeyboardCheck.SetActive(IdePreferences.FrameBufferHardwareKeyboard.Value);
-        hardwareKeyboardCheck.SetMarginTop(10);
+        hardwareKeyboardCheck.SetMarginTop(4);
 
         var description = Gtk.Label.New(
             "These settings describe the emulated device a Linux Frame Buffer head is\n" +
@@ -76,6 +82,12 @@ public class FrameBufferOptionsPanel : OptionsPanel
             "resolution selected here. Orientation and resolution changes apply to the\n" +
             "next emulator window that opens: an emulator already open stays as it is\n" +
             "until it is closed, from Tools > Close Emulator or the window manager.\n" +
+            "\n" +
+            "Emulator font isolation applies to the next emulator that opens. With it on,\n" +
+            "the application can only use the fonts it actually ships, so text it has no\n" +
+            "font for is drawn as missing glyphs — what the device would really show. With\n" +
+            "it off, this machine's installed fonts fill those gaps, which flatters the\n" +
+            "application: it appears to display scripts a real device could not.\n" +
             "\n" +
             "Hardware keyboard support applies at once. With it on, keystrokes go to the\n" +
             "application running in the emulator whenever the emulator window is the\n" +
@@ -99,6 +111,7 @@ public class FrameBufferOptionsPanel : OptionsPanel
         box.Append(resolutionDropDown);
         box.Append(languageLabel);
         box.Append(languageDropDown);
+        box.Append(fontIsolationCheck);
         box.Append(hardwareKeyboardCheck);
         box.Append(description);
         return box;
@@ -109,6 +122,7 @@ public class FrameBufferOptionsPanel : OptionsPanel
         SelectedOrientation != IdePreferences.FrameBufferScreenOrientation.Value ||
         SelectedResolution != IdePreferences.FrameBufferScreenResolution.Value ||
         SelectedLanguage != IdePreferences.FrameBufferSystemLanguage.Value ||
+        SelectedFontIsolation != IdePreferences.FrameBufferFontIsolation.Value ||
         SelectedHardwareKeyboard != IdePreferences.FrameBufferHardwareKeyboard.Value;
 
     /// <inheritdoc/>
@@ -117,6 +131,7 @@ public class FrameBufferOptionsPanel : OptionsPanel
         IdePreferences.FrameBufferScreenOrientation.Value = SelectedOrientation;
         IdePreferences.FrameBufferScreenResolution.Value = SelectedResolution;
         IdePreferences.FrameBufferSystemLanguage.Value = SelectedLanguage;
+        IdePreferences.FrameBufferFontIsolation.Value = SelectedFontIsolation;
         IdePreferences.FrameBufferHardwareKeyboard.Value = SelectedHardwareKeyboard;
     }
 
@@ -131,6 +146,9 @@ public class FrameBufferOptionsPanel : OptionsPanel
     string SelectedLanguage => languageDropDown == null
         ? IdePreferences.FrameBufferSystemLanguage.Value
         : FrameBufferLanguageInfo.FromIndex((int) languageDropDown.GetSelected()).Code;
+
+    bool SelectedFontIsolation => fontIsolationCheck?.GetActive()
+        ?? IdePreferences.FrameBufferFontIsolation.Value;
 
     bool SelectedHardwareKeyboard => hardwareKeyboardCheck?.GetActive()
         ?? IdePreferences.FrameBufferHardwareKeyboard.Value;

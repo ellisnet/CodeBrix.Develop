@@ -115,6 +115,38 @@ public class FrameBufferEmulatorSessionTests
     }
 
     [Fact]
+    public void Font_isolation_is_on_unless_it_is_turned_off()
+    {
+        //Arrange — the emulator's whole point is showing what the DEVICE would
+        //show, and the host's fonts are not on the device.
+        using var session = new FrameBufferEmulatorSession(Width, Height);
+
+        //Act
+        var variables = session.EnvironmentVariables;
+
+        //Assert
+        session.FontIsolation.Should().BeTrue();
+        variables[FrameBufferEmulatorProtocol.FontIsolationVariable].Should().Be("1");
+    }
+
+    [Theory]
+    [InlineData(true, "1")]
+    [InlineData(false, "0")]
+    public void The_font_isolation_choice_reaches_the_launch_contract(bool isolation, string expected)
+    {
+        //Arrange — always sent explicitly, so the head can tell "turned off" from
+        //an IDE that predates the setting.
+        using var session = new FrameBufferEmulatorSession(Width, Height, fontIsolation: isolation);
+
+        //Act
+        var variables = session.EnvironmentVariables;
+
+        //Assert
+        session.FontIsolation.Should().Be(isolation);
+        variables[FrameBufferEmulatorProtocol.FontIsolationVariable].Should().Be(expected);
+    }
+
+    [Fact]
     public async Task A_frame_published_by_the_app_reaches_the_frame_source()
     {
         //Arrange

@@ -1296,7 +1296,8 @@ public class Workbench
             ShowStatus($"Running {project.Name} in the Frame Buffer emulator…");
 
             session = new FrameBufferEmulatorSession(device.Width, device.Height,
-                IdePreferences.FrameBufferSystemLanguage.Value);
+                IdePreferences.FrameBufferSystemLanguage.Value,
+                IdePreferences.FrameBufferFontIsolation.Value);
             AttachFrameBufferSession(session);
 
             using var killCts = new CancellationTokenSource();
@@ -1343,7 +1344,8 @@ public class Workbench
         ShowBottomTab(applicationOutput.Widget);
         ShowStatus($"Debugging {project.Name} in the Frame Buffer emulator…");
         var session = new FrameBufferEmulatorSession(device.Width, device.Height,
-            IdePreferences.FrameBufferSystemLanguage.Value);
+            IdePreferences.FrameBufferSystemLanguage.Value,
+            IdePreferences.FrameBufferFontIsolation.Value);
         try
         {
             AttachFrameBufferSession(session);

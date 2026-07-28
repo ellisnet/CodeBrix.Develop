@@ -50,6 +50,7 @@ public sealed class FrameBufferEmulatorSession : IFrameBufferFrameSource, IDispo
     readonly int slot1Offset;
 
     readonly string systemLanguage;
+    readonly bool fontIsolation;
     readonly string sessionDirectory;
     readonly string shmPath;
     readonly string socketPath;
@@ -104,14 +105,26 @@ public sealed class FrameBufferEmulatorSession : IFrameBufferFrameSource, IDispo
     /// opens, never to one already running. Blank is normalized to
     /// "system-default" so the variable is always sent explicitly.
     /// </para>
+    /// <para>
+    /// <paramref name="fontIsolation"/> is captured once per launch for the same
+    /// reason. With it on the emulated application is confined to the fonts it
+    /// actually ships, so text it has no font for comes out as missing glyphs
+    /// rather than being filled in from the host desktop's fonts — which a real
+    /// frame-buffer device would not have.
+    /// </para>
     /// </summary>
-    public FrameBufferEmulatorSession(int deviceWidth, int deviceHeight, string? systemLanguage = null)
+    public FrameBufferEmulatorSession(
+        int deviceWidth,
+        int deviceHeight,
+        string? systemLanguage = null,
+        bool fontIsolation = true)
     {
         ArgumentOutOfRangeException.ThrowIfLessThanOrEqual(deviceWidth, 0);
         ArgumentOutOfRangeException.ThrowIfLessThanOrEqual(deviceHeight, 0);
         this.systemLanguage = string.IsNullOrWhiteSpace(systemLanguage)
             ? FrameBufferEmulatorProtocol.SystemDefaultLanguage
             : systemLanguage;
+        this.fontIsolation = fontIsolation;
         this.deviceWidth = deviceWidth;
         this.deviceHeight = deviceHeight;
         frameBytes = deviceWidth * 4 * deviceHeight;
@@ -164,6 +177,9 @@ public sealed class FrameBufferEmulatorSession : IFrameBufferFrameSource, IDispo
             [FrameBufferEmulatorProtocol.HeightVariable] =
                 deviceHeight.ToString(CultureInfo.InvariantCulture),
             [FrameBufferEmulatorProtocol.LanguageVariable] = systemLanguage,
+            [FrameBufferEmulatorProtocol.FontIsolationVariable] = fontIsolation
+                ? FrameBufferEmulatorProtocol.FontIsolationOn
+                : FrameBufferEmulatorProtocol.FontIsolationOff,
         };
 
     /// <summary>
@@ -171,6 +187,12 @@ public sealed class FrameBufferEmulatorSession : IFrameBufferFrameSource, IDispo
     /// "system-default" to follow the host. Fixed for the session's life.
     /// </summary>
     public string SystemLanguage => systemLanguage;
+
+    /// <summary>
+    /// Whether this launch confines the application to the fonts it ships.
+    /// Fixed for the session's life, like the language.
+    /// </summary>
+    public bool FontIsolation => fontIsolation;
 
     /// <summary>True while the app is connected and past its handshake.</summary>
     public bool IsConnected => connected;

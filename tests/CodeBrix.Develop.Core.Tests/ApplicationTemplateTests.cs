@@ -23,13 +23,46 @@ public class ApplicationTemplateTests : IDisposable
         try { Directory.Delete(tempDirectory, recursive: true); } catch { /* best effort */ }
     }
 
-    ApplicationTemplateOptions MakeOptions(string name = "MyNewApp", ApplicationFont font = ApplicationFont.OpenSans) =>
+    // The descriptors the real font packages publish, inlined so these tests
+    // never touch the network or the machine's NuGet cache.
+    internal const string OpenSansDescriptorJson = """
+        {
+          "schemaVersion": 1,
+          "packageId": "CodeBrix.Platform.Fonts.OpenSans.ApacheLicenseForever",
+          "displayName": "Open Sans",
+          "fontFamilyUri": "ms-appx:///CodeBrix.Platform.Fonts.OpenSans/Fonts/OpenSans.ttf",
+          "resourceKey": "OpenSansFont",
+          "keyboardLayouts": [ "en", "de", "ru" ]
+        }
+        """;
+
+    internal const string RobotoDescriptorJson = """
+        {
+          "schemaVersion": 1,
+          "packageId": "CodeBrix.Platform.Fonts.Roboto.OflLicenseForever",
+          "displayName": "Roboto",
+          "fontFamilyUri": "ms-appx:///CodeBrix.Platform.Fonts.Roboto/Fonts/Roboto.ttf",
+          "resourceKey": "RobotoFont",
+          "fallbackFontUris": [
+            "ms-appx:///CodeBrix.Platform.Fonts.Roboto/Fonts/NotoSansArmenian.ttf",
+            "ms-appx:///CodeBrix.Platform.Fonts.Roboto/Fonts/NotoSansGeorgian.ttf"
+          ],
+          "keyboardLayouts": [ "en", "de", "ru", "ka", "hy" ]
+        }
+        """;
+
+    internal static FontSwap RobotoSwap() =>
+        FontSwap.For(
+            FontDescriptor.Parse(OpenSansDescriptorJson),
+            FontDescriptor.Parse(RobotoDescriptorJson));
+
+    ApplicationTemplateOptions MakeOptions(string name = "MyNewApp", FontSwap fontSwap = null) =>
         new ApplicationTemplateOptions
         {
             Name = name,
             Location = tempDirectory,
             Heads = new[] { PlatformHead.MacOS, PlatformHead.LinuxX11, PlatformHead.WinWpfSkia },
-            Font = font,
+            FontSwap = fontSwap,
             LibrarySuffixes = new[] { "Graphics", "DatabaseAccess" },
         };
 
@@ -159,7 +192,7 @@ public class ApplicationTemplateTests : IDisposable
     public void Roboto_font_replaces_every_open_sans_reference()
     {
         //Act
-        ApplicationTemplate.Generate(MakeOptions(font: ApplicationFont.Roboto));
+        ApplicationTemplate.Generate(MakeOptions(fontSwap: RobotoSwap()));
         var root = Path.Combine(tempDirectory, "MyNewApp");
 
         //Assert — the Roboto package and resources are referenced...
@@ -167,15 +200,53 @@ public class ApplicationTemplateTests : IDisposable
         coreCsproj.Should().Contain("Include=\"CodeBrix.Platform.Fonts.Roboto.OflLicenseForever\" Version=\"");
         var appXaml = File.ReadAllText(Path.Combine(root, "src", "MyNewApp.UI", "App.xaml"));
         appXaml.Should().Contain("x:Key=\"RobotoFont\"");
-        appXaml.Should().Contain("ms-appx:///CodeBrix.Platform.Fonts.Roboto/Fonts/Roboto.ttf#Roboto");
+        appXaml.Should().Contain("ms-appx:///CodeBrix.Platform.Fonts.Roboto/Fonts/Roboto.ttf");
         File.ReadAllText(Path.Combine(root, "src", "MyNewApp.UI", "Views", "MainPage.xaml"))
             .Should().Contain("{StaticResource RobotoFont}");
         File.ReadAllText(Path.Combine(root, "src", "MyNewApp.UI", "App.xaml.cs"))
-            .Should().Contain("ms-appx:///CodeBrix.Platform.Fonts.Roboto/Fonts/Roboto.ttf#Roboto");
+            .Should().Contain("ms-appx:///CodeBrix.Platform.Fonts.Roboto/Fonts/Roboto.ttf");
 
-        //...and NO generated file mentions OpenSans anywhere.
+        //...and NO generated file mentions the template's own font anywhere,
+        //in either the no-space or the spaced form.
         foreach (var file in Directory.EnumerateFiles(root, "*", SearchOption.AllDirectories))
-            File.ReadAllText(file).Should().NotContain("OpenSans");
+        {
+            var text = File.ReadAllText(file);
+            text.Should().NotContain("OpenSans");
+            text.Should().NotContain("Open Sans");
+        }
+    }
+
+    [Fact]
+    public void A_font_with_companions_registers_them_in_the_application_code_behind()
+    {
+        //Act
+        ApplicationTemplate.Generate(MakeOptions(fontSwap: RobotoSwap()));
+
+        //Assert — the companion fonts are what supply the scripts the primary
+        //font has no glyphs for, and CodeBrix.Platform only consults fonts the
+        //application registers, so an unregistered companion is dead weight.
+        var appCodeBehind = File.ReadAllText(Path.Combine(
+            tempDirectory, "MyNewApp", "src", "MyNewApp.UI", "App.xaml.cs"));
+
+        appCodeBehind.Should().Contain("FeatureConfiguration.Font.FallbackFontFamilies");
+        appCodeBehind.Should().Contain("ms-appx:///CodeBrix.Platform.Fonts.Roboto/Fonts/NotoSansArmenian.ttf");
+        appCodeBehind.Should().Contain("ms-appx:///CodeBrix.Platform.Fonts.Roboto/Fonts/NotoSansGeorgian.ttf");
+
+        //...registered AFTER the default font, so the default is set first.
+        appCodeBehind.IndexOf("FallbackFontFamilies", StringComparison.Ordinal)
+            .Should().BeGreaterThan(appCodeBehind.IndexOf("DefaultTextFontFamily", StringComparison.Ordinal));
+    }
+
+    [Fact]
+    public void The_template_font_leaves_the_code_behind_untouched()
+    {
+        //Act — Open Sans ships no companions, and it is the template's own
+        //font, so generation performs no swap at all.
+        ApplicationTemplate.Generate(MakeOptions());
+
+        //Assert
+        File.ReadAllText(Path.Combine(tempDirectory, "MyNewApp", "src", "MyNewApp.UI", "App.xaml.cs"))
+            .Should().NotContain("FallbackFontFamilies");
     }
 
     [Fact]
@@ -237,18 +308,21 @@ public class ApplicationTemplateTests : IDisposable
     }
 
     [Fact]
-    public void Roboto_font_reference_carries_the_roboto_package_version()
+    public void Roboto_font_reference_carries_a_version()
     {
         //Act
-        ApplicationTemplate.Generate(MakeOptions(font: ApplicationFont.Roboto));
+        ApplicationTemplate.Generate(MakeOptions(fontSwap: RobotoSwap()));
 
-        //Assert — the font swap replaces the package id in the template's
-        // text, so the version has to be swapped too: the template only ever
-        // carries the DEFAULT font's version, which does not exist for Roboto.
+        //Assert — the swapped-in reference keeps whatever version the template
+        // carried for its own font. That value says nothing about Roboto, and
+        // it does not need to: ApplicationPackageVersionUpdater rewrites every
+        // reference to the latest published version straight after generation.
+        // What matters here is that the reference is never left unversioned,
+        // so the application builds even when nuget.org cannot be reached.
         var coreCsproj = File.ReadAllText(Path.Combine(tempDirectory, "MyNewApp",
             "src", "MyNewApp.Core", "MyNewApp.Core.csproj"));
         PackageReferenceReader.ReadVersion(coreCsproj, "CodeBrix.Platform.Fonts.Roboto.OflLicenseForever")
-            .Should().Be("1.0.181.661");
+            .Should().NotBeNull();
     }
 
     [Fact]
@@ -270,7 +344,7 @@ public class ApplicationTemplateTests : IDisposable
     public void Every_generated_project_file_pins_every_package_reference()
     {
         //Act
-        ApplicationTemplate.Generate(MakeOptions(font: ApplicationFont.Roboto));
+        ApplicationTemplate.Generate(MakeOptions(fontSwap: RobotoSwap()));
         var root = Path.Combine(tempDirectory, "MyNewApp");
 
         //Assert — nothing anywhere in the solution is left unversioned, so an

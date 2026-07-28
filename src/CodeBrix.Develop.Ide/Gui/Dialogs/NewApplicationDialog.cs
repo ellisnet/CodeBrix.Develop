@@ -143,7 +143,7 @@ public class NewApplicationDialog
         var fontLabel = Gtk.Label.New("Application font:");
         fontLabel.SetXalign(0);
         fontDropDown = Gtk.DropDown.NewFromStrings(
-            ApplicationFontInfo.All.Select(info => info.DisplayName).ToArray());
+            ApplicationFontCatalog.All.Select(choice => choice.DisplayName).ToArray());
         fontDropDown.SetHalign(Gtk.Align.Start);
         fontDropDown.SetSelected(0); // Open Sans is the default
 
@@ -311,6 +311,27 @@ public class NewApplicationDialog
         }
     }
 
+    /// <summary>
+    /// The swap from the template's own font to the chosen one, or null when
+    /// the user kept the template's font — in which case nothing is fetched and
+    /// generation works with no network at all.
+    /// </summary>
+    static async Task<FontSwap?> ResolveFontSwapAsync(
+        ApplicationFontChoice chosen, FontDescriptorResolver resolver)
+    {
+        if (ApplicationFontCatalog.IsTemplateFont(chosen.PackageId))
+            return null;
+
+        var templateFont = await resolver.ResolveAsync(ApplicationFontCatalog.TemplatePackageId);
+        var chosenFont = await resolver.ResolveAsync(chosen.PackageId);
+        return FontSwap.For(templateFont, chosenFont);
+    }
+
+    Task<FontSwap?> ResolveFontSwapAsync() =>
+        ResolveFontSwapAsync(
+            ApplicationFontCatalog.FromIndex((int) fontDropDown.GetSelected()),
+            new FontDescriptorResolver());
+
     async Task CreateAsync()
     {
         var name = nameEntry.GetText().Trim();
@@ -321,13 +342,19 @@ public class NewApplicationDialog
         var generated = false;
         try
         {
+            // The chosen font describes itself, so nothing about it is known
+            // here beyond its package id. Resolving before anything is written
+            // means a font that cannot be resolved costs the user a message
+            // rather than a half-configured application on disk.
+            progressLabel.SetText("Resolving the application font…");
+            var fontSwap = await ResolveFontSwapAsync();
+
             var options = new ApplicationTemplateOptions
             {
                 Name = nameEntry.GetText().Trim(),
                 Location = locationEntry.GetText().Trim(),
                 Heads = CheckedHeads(),
-                Font = ApplicationFontInfo.All[
-                    Math.Clamp((int) fontDropDown.GetSelected(), 0, ApplicationFontInfo.All.Count - 1)].Font,
+                FontSwap = fontSwap,
                 LibrarySuffixes = ParseLibrarySuffixes(),
             };
 

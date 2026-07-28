@@ -122,6 +122,16 @@ public static class IdePreferences
             FrameBufferLanguageInfo.SystemDefaultCode);
 
     /// <summary>
+    /// Whether the emulated frame-buffer device confines the application to the
+    /// fonts it actually ships, rather than letting the host desktop's installed
+    /// fonts fill in what the application has no font for. On by default: the
+    /// host is a full desktop and the device is not, so without it the emulator
+    /// shows text a real device could not display.
+    /// </summary>
+    public static readonly ConfigurationProperty<bool> FrameBufferFontIsolation =
+        ConfigurationProperty.Create("CodeBrix.Develop.Ide.FrameBuffer.FontIsolation", true);
+
+    /// <summary>
     /// Whether the emulated frame-buffer device has a hardware keyboard.
     /// Stored only — nothing reads it yet.
     /// </summary>

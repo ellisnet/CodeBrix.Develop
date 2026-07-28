@@ -39,6 +39,17 @@ namespace CodeBrix.Develop.Emulation.FrameBuffer.Transport;
 /// the next time the emulator opens. There is no lockstep check for it — an
 /// empty or unrecognized value falls back to the host language rather than
 /// failing the launch.
+/// CODEBRIX_FBEMU_FONT_ISOLATION is "1" or "0": with it on, the application is
+/// confined to the fonts it actually ships and the host's installed fonts are
+/// never consulted, so a script none of its fonts covers renders as missing
+/// glyphs — what the real device would show — instead of being quietly
+/// satisfied by a desktop font the device does not have. Read ONCE at startup,
+/// like the language. Note it deliberately does NOT follow the language
+/// variable's "absent means the default" rule: the IDE defaults the setting ON
+/// and always sends it, so an ABSENT variable means an IDE that predates the
+/// setting, and that IDE offers no way to turn isolation back off — absent
+/// therefore means OFF, which is how the emulator behaved before this existed.
+/// An unrecognized value is treated as absent.
 /// </para>
 /// <para>
 /// SHARED MEMORY — a 64-byte little-endian header (field offsets below), then
@@ -149,12 +160,19 @@ internal static class FrameBufferEmulatorProtocol
     public const string WidthVariable = "CODEBRIX_FBEMU_WIDTH";
     public const string HeightVariable = "CODEBRIX_FBEMU_HEIGHT";
     public const string LanguageVariable = "CODEBRIX_FBEMU_LANGUAGE";
+    public const string FontIsolationVariable = "CODEBRIX_FBEMU_FONT_ISOLATION";
 
     /// <summary>
     /// The <see cref="LanguageVariable"/> value meaning "follow the host's own
     /// language" — what the IDE sends until the user picks a specific language.
     /// </summary>
     public const string SystemDefaultLanguage = "system-default";
+
+    /// <summary>The <see cref="FontIsolationVariable"/> value that turns font isolation on.</summary>
+    public const string FontIsolationOn = "1";
+
+    /// <summary>The <see cref="FontIsolationVariable"/> value that turns font isolation off.</summary>
+    public const string FontIsolationOff = "0";
 
     /// <summary>
     /// Computes the layout of the shared-memory file for a device resolution:

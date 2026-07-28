@@ -32,8 +32,13 @@ public class ApplicationTemplateOptions
     /// <summary>The platform heads to generate (at least one).</summary>
     public IReadOnlyList<PlatformHead> Heads { get; set; } = Array.Empty<PlatformHead>();
 
-    /// <summary>The application's default text font (Open Sans unless chosen otherwise).</summary>
-    public ApplicationFont Font { get; set; } = ApplicationFont.OpenSans;
+    /// <summary>
+    /// The font substitution to apply, or null to keep the template's own font
+    /// (which is what choosing that font means — there is nothing to change).
+    /// Built by <see cref="FontSwap.For"/> from the two packages' descriptors,
+    /// so generation carries no per-font knowledge.
+    /// </summary>
+    public FontSwap FontSwap { get; set; }
 
     /// <summary>
     /// Extra class-library assembly suffixes (e.g. "Graphics"), each
@@ -175,10 +180,6 @@ public static class ApplicationTemplate
         // nothing left on disk.
         var archiveBytes = TemplateArchive.GetActiveArchiveBytes();
         var hostingVersion = ReadHostingVersion(archiveBytes);
-        var font = ApplicationFontInfo.Get(options.Font);
-        if (options.Font != ApplicationFontInfo.DefaultFont && font.FallbackVersion == null)
-            throw new InvalidOperationException(
-                $"The {font.DisplayName} font has no package version; every font other than the default must supply one.");
 
         ExtractApplication(options, root, name, archiveBytes);
         GenerateLibraries(options, root, name, libraries, hostingVersion);
@@ -221,9 +222,7 @@ public static class ApplicationTemplate
             PlatformHeadInfo.All.Select(head => head.ProjectSuffix), StringComparer.OrdinalIgnoreCase);
 
         var newGuid = Guid.NewGuid().ToString();
-        var openSans = ApplicationFontInfo.Get(ApplicationFontInfo.DefaultFont);
-        var font = ApplicationFontInfo.Get(options.Font);
-        var switchFont = options.Font != ApplicationFontInfo.DefaultFont;
+        var fontSwap = options.FontSwap;
 
         var token = TemplateArchive.TemplateToken;
         var rootPrefix = token + "/";
@@ -260,17 +259,14 @@ public static class ApplicationTemplate
             // so the transformed file is byte-identical except where changed.
             var text = Encoding.Latin1.GetString(bytes);
             text = text.Replace(token, name);
-            if (switchFont)
+            if (fontSwap != null)
             {
-                text = text
-                    .Replace(openSans.PackageId, font.PackageId)
-                    .Replace(openSans.FontFamilyValue, font.FontFamilyValue)
-                    .Replace(openSans.ResourceKey, font.ResourceKey)
-                    .Replace(openSans.DisplayName, font.DisplayName);
-                // The template carries the DEFAULT font's version, which says
-                // nothing about the chosen font: swap the version too.
-                if (outRelative.EndsWith(".csproj", StringComparison.OrdinalIgnoreCase))
-                    text = PackageReferenceRewriter.UpdateVersion(text, font.PackageId, font.FallbackVersion, out _);
+                // The swapped-in package keeps whatever version the template
+                // carried for its own font, which says nothing about this one.
+                // ApplicationPackageVersionUpdater fixes every reference to the
+                // latest published version immediately after generation, so the
+                // value only has to be syntactically present, not correct.
+                text = fontSwap.Apply(text, outRelative);
             }
             if (IsSharedProjectFile(outRelative))
                 text = ReplaceSharedProjectGuid(text, newGuid);
