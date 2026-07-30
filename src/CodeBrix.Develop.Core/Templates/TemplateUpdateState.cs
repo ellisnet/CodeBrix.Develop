@@ -33,7 +33,7 @@ public static class TemplateUpdateState
     /// which the build's embedded/bundled baseline corresponds to. Also the
     /// value <see cref="ActiveCommitId"/> is reset to on fallback.
     /// </summary>
-    public const string BaselineCommitId = "38f5a49e3171d577e7612e317fe8e744b6534426";
+    public const string BaselineCommitId = "b87ddff6b01933db5cbd1d6c89c49af44071717f";
 
     const string CommitIdKey = "TemplateArchive.ActiveCommitId";
     const string UseUpdatedKey = "TemplateArchive.UseUpdatedCopy";
