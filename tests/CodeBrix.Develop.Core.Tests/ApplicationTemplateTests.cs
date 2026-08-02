@@ -373,7 +373,7 @@ public class NuGetVersionTests
     {
         //Assert — numeric segments compare as numbers, not as text...
         NuGetVersion.SelectLatestRelease(new[] { "1.0.9", "1.0.10", "1.0.10-preview.1" }).Should().Be("1.0.10");
-        NuGetVersion.SelectLatestRelease(new[] { "3.119.4", "4.148.0", "4.150.1" }).Should().Be("4.150.1");
+        NuGetVersion.SelectLatestRelease(new[] { "3.119.4", "4.148.0", "4.151.0" }).Should().Be("4.151.0");
 
         //...and a package with nothing but previews published means "leave it
         // alone", never "take the preview".
@@ -384,10 +384,10 @@ public class NuGetVersionTests
     [Fact]
     public void Pinned_versions_are_distinguished_from_ranges()
     {
-        NuGetVersion.IsPinned("4.150.1").Should().BeTrue();
+        NuGetVersion.IsPinned("4.151.0").Should().BeTrue();
         NuGetVersion.IsPinned("14.2.1.1").Should().BeTrue();
-        NuGetVersion.IsPinned("[4.150.1]").Should().BeFalse();
-        NuGetVersion.IsPinned("[4.150.1,5.0.0)").Should().BeFalse();
+        NuGetVersion.IsPinned("[4.151.0]").Should().BeFalse();
+        NuGetVersion.IsPinned("[4.151.0,5.0.0)").Should().BeFalse();
         NuGetVersion.IsPinned("4.*").Should().BeFalse();
         NuGetVersion.IsPinned("").Should().BeFalse();
     }
@@ -395,7 +395,7 @@ public class NuGetVersionTests
     [Fact]
     public void Lower_returns_the_older_version_and_tolerates_nulls()
     {
-        NuGetVersion.Lower("4.150.1", "4.148.0").Should().Be("4.148.0");
+        NuGetVersion.Lower("4.151.0", "4.148.0").Should().Be("4.148.0");
         NuGetVersion.Lower("1.0.201.336", null).Should().Be("1.0.201.336");
         NuGetVersion.Lower(null, "1.0.201.336").Should().Be("1.0.201.336");
         NuGetVersion.Lower(null, null).Should().BeNull();

@@ -33,8 +33,8 @@ public static class NuGetVersion
 
     /// <summary>
     /// Whether the version is a single pinned version rather than a version
-    /// range or floating version — "4.150.1" is pinned; "[4.150.1,5.0.0)",
-    /// "[4.150.1]", and "4.*" are not.
+    /// range or floating version — "4.151.0" is pinned; "[4.151.0,5.0.0)",
+    /// "[4.151.0]", and "4.*" are not.
     /// </summary>
     public static bool IsPinned(string version)
     {

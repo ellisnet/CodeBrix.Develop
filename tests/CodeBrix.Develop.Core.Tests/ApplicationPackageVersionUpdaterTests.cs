@@ -9,7 +9,7 @@ namespace CodeBrix.Develop.Core.Tests;
 public class ApplicationPackageVersionUpdaterTests
 {
     const string PlatformVersion = "1.0.201.336";
-    const string SkiaVersion = "4.150.1";
+    const string SkiaVersion = "4.151.0";
     const string HarfBuzzVersion = "14.2.1.1";
 
     static IReadOnlyDictionary<string, string> Latest(params (string Id, string Version)[] entries)
