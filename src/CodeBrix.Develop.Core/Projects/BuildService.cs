@@ -51,6 +51,16 @@ public class BuildService
     public Task<BuildResult> RestoreAsync(FilePath target, CancellationToken cancellationToken = default)
         => RunBuildVerbAsync("restore", target, cancellationToken);
 
+    /// <summary>
+    /// Runs "dotnet publish" for the given project, framework-dependent, for
+    /// the given runtime identifier, into <paramref name="outputDirectory"/> —
+    /// the deploy staging for running the app on a remote device.
+    /// </summary>
+    public Task<BuildResult> PublishAsync(FilePath project, string runtimeIdentifier, FilePath outputDirectory,
+        CancellationToken cancellationToken = default)
+        => RunBuildVerbAsync("publish", project, cancellationToken,
+            "-c", "Debug", "-r", runtimeIdentifier, "--self-contained", "false", "-o", outputDirectory);
+
     async Task<BuildResult> RunBuildVerbAsync(string verb, FilePath target, CancellationToken cancellationToken, params string[] extraArguments)
     {
         var result = new BuildResult();

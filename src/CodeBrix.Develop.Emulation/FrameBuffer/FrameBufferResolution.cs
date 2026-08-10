@@ -28,6 +28,12 @@ public enum FrameBufferResolution
     /// <summary>A 7-inch screen, 720 x 1280 in portrait.</summary>
     SevenInch720x1280,
 
+    /// <summary>A 7-inch screen, 800 x 1280 in portrait (e.g. WinBook TW700).</summary>
+    SevenInch800x1280,
+
+    /// <summary>An 8-inch screen, 800 x 1280 in portrait (e.g. WinBook TW802).</summary>
+    EightInch800x1280,
+
     /// <summary>A 10-inch screen, 1200 x 1920 in portrait.</summary>
     TenInch1200x1920,
 

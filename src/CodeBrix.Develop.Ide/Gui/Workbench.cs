@@ -16,6 +16,7 @@ using System.Collections.Generic;
 using CodeBrix.Develop.Core;
 using CodeBrix.Develop.Core.Debugging;
 using CodeBrix.Develop.Core.Projects;
+using CodeBrix.Develop.Core.Remote;
 using CodeBrix.Develop.Core.Testing;
 using CodeBrix.Develop.Core.TypeSystem;
 using CodeBrix.Develop.Emulation.FrameBuffer;
@@ -25,8 +26,10 @@ using CodeBrix.Develop.Ide.Gui.Dialogs;
 using CodeBrix.Develop.Ide.Gui.Documents;
 using CodeBrix.Develop.Ide.Gui.Options;
 using CodeBrix.Develop.Ide.Gui.Pads;
+using CodeBrix.Develop.Ide.Remote;
 using CodeBrix.Develop.Ide.Themes;
 using Gio = CodeBrix.Develop.UI.Gio;
+using GObject = CodeBrix.Develop.UI.GObject;
 using Gtk = CodeBrix.Develop.UI.Gtk;
 
 namespace CodeBrix.Develop.Ide.Gui;
@@ -49,6 +52,7 @@ public class Workbench
     readonly OutputPad nugetOutput;
     readonly OutputPad ideLog;
     readonly CallStackPad callStackPad;
+    readonly TerminalPad terminalPad;
     readonly Gtk.Notebook bottomNotebook;
     readonly Gtk.Label statusLabel;
     EditorDocument? executionDocument;
@@ -76,6 +80,14 @@ public class Workbench
     // null between launches. The window's Touch handler reads this field, so
     // touch forwarding follows whichever session is live.
     FrameBufferEmulatorSession? frameBufferSession;
+
+    // The SSH device that reached "FrameBuffer Device Ready" and is now the
+    // Run/Debug target for a .LinuxFrameBuffer startup head (in place of the
+    // emulator). Null when no such device is active; cleared on disconnect.
+    SshTerminalSession? activeFrameBufferDevice;
+
+    // The app currently running on the active FrameBuffer device, if any.
+    RemoteApplication? runningDeviceApp;
 
     Gio.SimpleAction? buildAction, rebuildAction, cleanAction, runAction, stopAction, closeSolutionAction;
     Gio.SimpleAction? debugAction, stepOverAction, stepIntoAction, stepOutAction;
@@ -128,12 +140,16 @@ public class Workbench
         // The Test Results tab is the runner's console: what `dotnet test`
         // would have printed. The run's scoreboard lives on the Tests pad.
         testOutput = new OutputPad();
+        terminalPad = new TerminalPad(uiContext);
+        terminalPad.StatusChanged += ShowStatus;
+        terminalPad.SessionEnded += OnFrameBufferDeviceDisconnected;
         bottomNotebook = Gtk.Notebook.New();
         bottomNotebook.AppendPage(applicationOutput.Widget, Gtk.Label.New("Application Output"));
         bottomNotebook.AppendPage(buildOutput.Widget, Gtk.Label.New("Build Output"));
         bottomNotebook.AppendPage(nugetOutput.Widget, Gtk.Label.New("Nuget Output"));
         bottomNotebook.AppendPage(callStackPad.Widget, Gtk.Label.New("Call Stack"));
         bottomNotebook.AppendPage(testOutput.Widget, Gtk.Label.New("Test Results"));
+        bottomNotebook.AppendPage(terminalPad.Widget, Gtk.Label.New("Terminal"));
         bottomNotebook.AppendPage(ideLog.Widget, Gtk.Label.New("IDE Log"));
         bottomNotebook.SetVexpand(false);
 
@@ -228,6 +244,8 @@ public class Workbench
             // Loss of power for any emulated app still running: cancelling
             // the run pulls its socket (the head hard-exits on end-of-file).
             runCancellation?.Cancel();
+            runningDeviceApp?.Dispose();
+            terminalPad.Shutdown();
             frameBufferSession?.Shutdown();
             // The emulator is a window of this application: left open it would
             // keep the process alive after the workbench is gone.
@@ -364,6 +382,7 @@ public class Workbench
             DebugService.Shutdown(clearBreakpoints: false);
             documentManager.SaveAll();
             SaveUiState();
+            terminalPad.Shutdown();
             application.Quit();
         }, "<Control>q");
 
@@ -388,6 +407,9 @@ public class Workbench
         // Not Ctrl+Shift+T — Run Test at Caret has it. Ctrl+` is the
         // "show me a terminal" binding editors have taught everyone.
         openSolutionTerminalAction = AddAction("open-solution-terminal", OpenSolutionTerminal, "<Control>grave", enabled: false);
+        // Solution-independent: a device connection is about the machine on
+        // the desk, not about what is loaded in the IDE.
+        AddAction("ssh-to-device", ShowSshToDeviceDialog);
         AddAction("about", ShowAbout);
 
         // The MonoDevelop convention: Ctrl+T runs every test in the solution.
@@ -467,6 +489,7 @@ public class Workbench
         var toolsMenu = Gio.Menu.New();
         toolsMenu.Append("Open Solution _Folder", "app.open-solution-folder");
         toolsMenu.Append("Open Solution _Terminal", "app.open-solution-terminal");
+        toolsMenu.Append("SSH to _Device…", "app.ssh-to-device");
         toolsMenu.Append("_Update CodeBrix Package References", "app.update-codebrix-packages");
         toolsMenu.Append("Close _Emulator", "app.close-emulator");
 
@@ -1179,6 +1202,12 @@ public class Workbench
             _ = DebugService.StopAsync();
         else if (TestService.IsRunning)
             testRunCancellation?.Cancel();
+        else if (runningDeviceApp is { } deviceApp)
+        {
+            // The app is running on the device; killing it lets the run finish.
+            deviceApp.Stop();
+            ShowStatus("Stopping the app on the device…");
+        }
         else if (runCancellation != null)
             runCancellation.Cancel();
         else if (frameBufferEmulationRunning)
@@ -1633,7 +1662,12 @@ public class Workbench
 
         if (StartupHeadPolicy.IsFrameBufferHead(project.Name))
         {
-            await RunFrameBufferEmulatedAsync(project);
+            // A device that reached "ready" takes the place of the emulator;
+            // otherwise the emulator runs, exactly as before.
+            if (activeFrameBufferDevice is { } device)
+                await RunOnDeviceAsync(project, device);
+            else
+                await RunFrameBufferEmulatedAsync(project);
             return;
         }
 
@@ -1658,6 +1692,103 @@ public class Workbench
             runCancellation.Dispose();
             runCancellation = null;
             DisableStopUnlessEmulating();
+        }
+    }
+
+    // Deploy + run a .LinuxFrameBuffer head on the active SSH device: publish
+    // framework-dependent for the device's architecture, SFTP-sync to
+    // ~/apps/<Head>/, and launch it on the device's framebuffer, streaming
+    // output to Application Output. Stop kills the remote process.
+    async Task RunOnDeviceAsync(DotNetProject project, SshTerminalSession device)
+    {
+        var architecture = IdePreferences.SshDeviceArchitecture.Value;
+        var rid = DeviceRid.ForArchitecture(architecture);
+        if (rid == null)
+        {
+            ShowStatus($"Cannot deploy: the device architecture '{architecture}' is not recognized.");
+            return;
+        }
+
+        documentManager.SaveAll();
+        applicationOutput.Clear();
+        ShowBottomTab(applicationOutput.Widget);
+        stopAction?.SetEnabled(true);
+        runCancellation = new CancellationTokenSource();
+
+        var appName = project.Name;
+        var entryDll = $"{project.Name}.dll";
+        var remoteDir = DeviceLaunch.RemoteAppDirectory(appName);
+        var publishDir = Path.Combine(Path.GetTempPath(), "CodeBrix.Develop", "publish", appName);
+
+        try
+        {
+            ShowStatus($"Publishing {project.Name} for {rid}…");
+            applicationOutput.AppendLine($"Publishing {project.Name} for {rid}…");
+            var publishResult = await runService.PublishAsync(project.FileName, rid, publishDir, runCancellation.Token);
+            if (!publishResult.Success)
+            {
+                ShowStatus("Publish failed — see Application Output");
+                return;
+            }
+
+            ShowStatus($"Deploying to {device.DisplayName}…");
+            var uploaded = await Task.Run(() =>
+            {
+                using var sftp = device.CreateSftpClient();
+                return DeviceLaunch.Deploy(sftp, publishDir, remoteDir,
+                    line => uiContext.Post(_ => applicationOutput.AppendLine(line), null));
+            });
+            applicationOutput.AppendLine($"Deployed {uploaded} changed file(s) to ~/{remoteDir}.");
+
+            await CheckDeviceRenderPrerequisitesAsync(device);
+
+            ShowStatus($"Running {project.Name} on {device.DisplayName}…");
+            var exited = new TaskCompletionSource<int?>(TaskCreationOptions.RunContinuationsAsynchronously);
+            var app = DeviceLaunch.Run(device, remoteDir, entryDll,
+                line => uiContext.Post(_ => applicationOutput.AppendLine(line), null));
+            app.Exited += code => uiContext.Post(_ => exited.TrySetResult(code), null);
+            runningDeviceApp = app;
+
+            var exitCode = await exited.Task;
+            applicationOutput.AppendLine($"The application exited on the device (code {exitCode?.ToString() ?? "unknown"}).");
+            ShowStatus($"{project.Name} exited on {device.DisplayName}");
+        }
+        catch (Exception ex)
+        {
+            LoggingService.LogError("Run on device failed", ex);
+            ShowStatus($"Run on device failed: {ex.Message}");
+        }
+        finally
+        {
+            runningDeviceApp?.Dispose();
+            runningDeviceApp = null;
+            runCancellation?.Dispose();
+            runCancellation = null;
+            DisableStopUnlessEmulating();
+        }
+    }
+
+    // Reports render/input prerequisites to Application Output, using the same
+    // native-dependency list the provisioning walk installs. Missing /dev/fb0
+    // or a fatal library stops the app from rendering; the rest only limit
+    // input. Nothing here blocks the launch — the user sees what happens.
+    async Task CheckDeviceRenderPrerequisitesAsync(SshTerminalSession device)
+    {
+        var (fbExit, _) = await Task.Run(() => device.RunCommand("test -e /dev/fb0"));
+        if (fbExit != 0)
+            applicationOutput.AppendLine(
+                "WARNING: /dev/fb0 was not found on the device — the software renderer has nothing to draw to.");
+
+        var libraryCache = await Task.Run(() => device.RunCommand(DeviceProvisioning.SharedLibraryCacheCommand).Output);
+        var missing = DeviceProvisioning.MissingNativeDependencies(libraryCache);
+        if (missing.Count > 0)
+        {
+            var fatal = missing.Any(dependency => dependency.Fatal);
+            var libraries = string.Join(", ", missing.Select(dependency => dependency.SharedObject));
+            var install = DeviceProvisioning.AptInstallCommand(missing.Select(dependency => dependency.AptPackage));
+            applicationOutput.AppendLine(
+                $"{(fatal ? "WARNING" : "NOTE")}: the device is missing native libraries ({libraries})" +
+                $"{(fatal ? " — the app cannot render until they are installed" : "")}. Install with: {install}");
         }
     }
 
@@ -1771,6 +1902,506 @@ public class Workbench
             ? $"Opened a terminal in {directory}"
             : error);
     }
+
+    void ShowSshToDeviceDialog()
+    {
+        var dialog = new SshToDeviceDialog(window, terminalPad.Columns, terminalPad.Rows);
+        dialog.Connected += session =>
+        {
+            // A fresh connection replaces any prior device; the new one only
+            // becomes the Run/Debug target once it reaches "ready".
+            activeFrameBufferDevice = null;
+            terminalPad.AttachSession(session);
+            ShowBottomTab(terminalPad.Widget);
+            ShowStatus($"SSH connected to {session.DisplayName}");
+            if (IdePreferences.SshDeviceUseAsFrameBuffer.Value)
+                _ = IdentifyFrameBufferDeviceAsync(session);
+        };
+        dialog.Present();
+    }
+
+    // The FrameBuffer-device identification pass: with "Use as FrameBuffer
+    // Device" checked, ask the just-connected device who it is — one command
+    // at a time, each on its own exec channel, so the interactive terminal
+    // is never disturbed. What the device reports describes ACTUAL hardware
+    // and lands in the SshDevice.* options — never in the FrameBuffer.*
+    // emulation settings.
+    async Task IdentifyFrameBufferDeviceAsync(SshTerminalSession session)
+    {
+        try
+        {
+            var (_, model) = await Task.Run(() => session.RunCommand("cat /sys/class/dmi/id/product_name"));
+            var (_, vendor) = await Task.Run(() => session.RunCommand("cat /sys/class/dmi/id/sys_vendor"));
+            var (_, hostnamectl) = await Task.Run(() => session.RunCommand("hostnamectl --json=short"));
+            // hostnamectl's JSON carries no architecture key (its text view
+            // computes that line client-side), so the architecture is asked
+            // for separately.
+            var (_, uname) = await Task.Run(() => session.RunCommand("uname -m"));
+
+            var identity = SshDeviceIdentity.Create(vendor, model, hostnamectl, uname);
+            IdePreferences.SshDeviceVendor.Value = identity.Vendor;
+            IdePreferences.SshDeviceModel.Value = identity.Model;
+            IdePreferences.SshDeviceOperatingSystem.Value = identity.OperatingSystem;
+            IdePreferences.SshDeviceKernel.Value = identity.Kernel;
+            IdePreferences.SshDeviceArchitecture.Value = identity.Architecture;
+            LoggingService.LogInfo(
+                $"SSH device identity: vendor={identity.Vendor}, model={identity.Model}, " +
+                $"os={identity.OperatingSystem}, kernel={identity.Kernel}, architecture={identity.Architecture}");
+
+            // The distribution facts, for the .NET-install track to reason
+            // about later (Debian vs Ubuntu-family, release version/codename).
+            var (_, osReleaseText) = await Task.Run(() => session.RunCommand("cat /etc/os-release"));
+            var osRelease = OsRelease.Parse(osReleaseText);
+            IdePreferences.SshDeviceOsId.Value = osRelease.Id;
+            IdePreferences.SshDeviceOsIdLike.Value = osRelease.IdLike;
+            IdePreferences.SshDeviceOsVersionId.Value = osRelease.VersionId;
+            IdePreferences.SshDeviceOsVersionCodename.Value = osRelease.VersionCodename;
+            LoggingService.LogInfo(
+                $"SSH device os-release: id={osRelease.Id}, id_like={osRelease.IdLike}, " +
+                $"version_id={osRelease.VersionId}, version_codename={osRelease.VersionCodename}");
+
+            var known = KnownFrameBufferDevice.TryFind(identity.Vendor, identity.Model);
+            if (known != null)
+            {
+                IdePreferences.SshDeviceScreen.Value = known.Screen.ToString();
+                IdePreferences.SshDeviceScreenOrientation.Value = known.NativeOrientation.ToString();
+                var screen = FrameBufferResolutionInfo.Get(known.Screen);
+                ShowStatus($"Identified FrameBuffer device: {identity.Vendor} {identity.Model} " +
+                    $"({screen.ShortSide} x {screen.LongSide})");
+            }
+            else
+            {
+                IdePreferences.SshDeviceScreen.Value = "";
+                IdePreferences.SshDeviceScreenOrientation.Value = "";
+                ShowStatus("Unknown FrameBuffer device.");
+            }
+
+            var (dotnetExit, dotnetOutput) = await Task.Run(() => session.RunCommand(DotnetRuntimeProbe.Command));
+            var hasDotnet = DotnetRuntimeProbe.IndicatesInstalled(dotnetExit, dotnetOutput);
+            LoggingService.LogInfo(hasDotnet
+                ? $".NET runtimes on {session.DisplayName}:\n{dotnetOutput.TrimEnd()}"
+                : $"No .NET runtime found on {session.DisplayName} (exit status {dotnetExit?.ToString() ?? "none"})");
+
+            // With .NET confirmed ready — already present, or installed just
+            // now — show the user what the IDE knows about the device.
+            bool ready;
+            string? dotnetProbeOutput;
+            if (hasDotnet)
+            {
+                ready = true;
+                dotnetProbeOutput = dotnetOutput;
+            }
+            else
+            {
+                (ready, dotnetProbeOutput) = await OfferDotnetInstallAsync(session);
+            }
+            if (!ready)
+                return;
+
+            // With "Enable for SSH Debugging" on, the device must have the
+            // framebuffer/input groups and a masked console getty before it is
+            // "ready"; walk the user through the one-time sudo provisioning
+            // first. Otherwise go straight to the ready summary.
+            if (IdePreferences.SshDeviceEnableDebugging.Value)
+                await ProvisionDebuggingThenShowReadyAsync(session, identity, known, dotnetProbeOutput);
+            else
+                ShowDeviceReady(session, identity, known, dotnetProbeOutput);
+        }
+        catch (Exception ex)
+        {
+            LoggingService.LogError("FrameBuffer device identification failed", ex);
+            ShowStatus("FrameBuffer device identification failed — see the IDE Log");
+        }
+    }
+
+    // The device is ready to run applications: point the startup project at its
+    // frame-buffer head and show the summary.
+    void ShowDeviceReady(
+        SshTerminalSession session, SshDeviceIdentity identity,
+        KnownFrameBufferDevice? known, string? dotnetProbeOutput)
+    {
+        // Reaching "ready" is what commits us to the real device: from here,
+        // Run/Debug of a .LinuxFrameBuffer startup head target this device
+        // instead of the emulator.
+        activeFrameBufferDevice = session;
+        AutoSelectFrameBufferStartup();
+        ShowFrameBufferDeviceReadyDialog(session, identity, known, dotnetProbeOutput);
+    }
+
+    // The active FrameBuffer device's SSH session ended: it is no longer the
+    // Run/Debug target, and any app running on it is gone with the connection.
+    void OnFrameBufferDeviceDisconnected()
+    {
+        activeFrameBufferDevice = null;
+        if (runningDeviceApp is { } app)
+        {
+            runningDeviceApp = null;
+            app.Dispose();
+            DisableStopUnlessEmulating();
+            ShowStatus("The FrameBuffer device disconnected — the app on it has stopped.");
+        }
+    }
+
+    // The SSH-debugging provisioning walk. Each unmet prerequisite gets a modal
+    // Paste/Cancel prompt: Paste closes the modal and types the sudo command
+    // into the live Terminal (the user presses Enter and gives their password),
+    // then the IDE polls the device's real state — over separate exec channels,
+    // never by scraping the terminal — until the command has taken effect. If a
+    // command is never run (or the user cancels), the walk stops here and the
+    // ready summary is never shown. Running the app as root is never offered.
+    async Task ProvisionDebuggingThenShowReadyAsync(
+        SshTerminalSession session, SshDeviceIdentity identity,
+        KnownFrameBufferDevice? known, string? dotnetProbeOutput)
+    {
+        try
+        {
+            var user = session.User;
+
+            // 1. video + input groups (persistent membership — reflects usermod
+            //    immediately, though the current session only sees it after a
+            //    reconnect).
+            var persistentGroups = await RunOnDeviceAsync(session, DeviceProvisioning.PersistentGroupsCommand(user));
+            if (!DeviceProvisioning.HasVideoAndInputGroups(persistentGroups))
+            {
+                if (!await PasteProvisioningCommandAsync(session,
+                        "The device needs your user in the video and input groups to draw to its screen and read the touchscreen.",
+                        DeviceProvisioning.AddVideoInputGroupsCommand(user)))
+                    return;
+                if (!await PollUntilAsync(session, () => DeviceProvisioning.HasVideoAndInputGroups(
+                        session.RunCommand(DeviceProvisioning.PersistentGroupsCommand(user)).Output)))
+                    return;
+            }
+
+            // 2. Masked console getty so the app owns the screen.
+            var gettyState = await RunOnDeviceAsync(session, DeviceProvisioning.GettyEnabledCommand);
+            if (!DeviceProvisioning.IsServiceMasked(gettyState))
+            {
+                if (!await PasteProvisioningCommandAsync(session,
+                        "The device is showing a text login on its screen. Masking it lets your application own the display.",
+                        DeviceProvisioning.MaskGettyCommand))
+                    return;
+                if (!await PollUntilAsync(session, () => DeviceProvisioning.IsServiceMasked(
+                        session.RunCommand(DeviceProvisioning.GettyEnabledCommand).Output)))
+                    return;
+            }
+
+            // 3. Native libraries the app needs (SkiaSharp/fontconfig, ICU,
+            //    libinput, libxkbcommon). A fresh minimal Debian lacks them;
+            //    install the missing ones in one apt command.
+            var libraryCache = await RunOnDeviceAsync(session, DeviceProvisioning.SharedLibraryCacheCommand);
+            var missing = DeviceProvisioning.MissingNativeDependencies(libraryCache);
+            if (missing.Count > 0)
+            {
+                var packages = missing.Select(dependency => dependency.AptPackage).ToList();
+                var libraries = string.Join(", ", missing.Select(dependency => dependency.SharedObject));
+                if (!await PasteProvisioningCommandAsync(session,
+                        $"The device is missing native libraries the app needs ({libraries}).",
+                        DeviceProvisioning.AptInstallCommand(packages)))
+                    return;
+                if (!await PollUntilAsync(session, () => DeviceProvisioning.MissingNativeDependencies(
+                        session.RunCommand(DeviceProvisioning.SharedLibraryCacheCommand).Output).Count == 0))
+                    return;
+            }
+
+            // The group change only reaches a NEW session; if this one already
+            // has the groups (nothing but getty was done), it is ready now —
+            // otherwise the user must reconnect for usermod to take effect.
+            var currentGroups = await RunOnDeviceAsync(session, DeviceProvisioning.CurrentSessionGroupsCommand);
+            if (DeviceProvisioning.HasVideoAndInputGroups(currentGroups))
+                ShowDeviceReady(session, identity, known, dotnetProbeOutput);
+            else
+                await ShowReconnectPromptAsync();
+        }
+        catch (Exception ex)
+        {
+            LoggingService.LogError("SSH debugging provisioning failed", ex);
+            ShowStatus("SSH debugging provisioning failed — see the IDE Log.");
+        }
+    }
+
+    // Runs a read-only check command on the device off the UI thread.
+    static Task<string> RunOnDeviceAsync(SshTerminalSession session, string command) =>
+        Task.Run(() => session.RunCommand(command).Output);
+
+    // The modal Paste/Cancel prompt. Returns true when the command was pasted
+    // into the Terminal (so the caller should start polling), false on Cancel
+    // or dismissal.
+    async Task<bool> PasteProvisioningCommandAsync(SshTerminalSession session, string message, string command)
+    {
+        var alert = Gtk.AlertDialog.NewWithProperties(Array.Empty<GObject.ConstructArgument>());
+        alert.SetMessage(message);
+        alert.SetDetail($"Click Paste to enter this command in the Terminal, then press Enter and provide your password:\n\n{command}");
+        alert.SetModal(true);
+        alert.SetButtons(new[] { "Cancel", "Paste" });
+        alert.SetCancelButton(0);
+        alert.SetDefaultButton(1);
+        int choice;
+        try
+        {
+            choice = await alert.ChooseAsync(window);
+        }
+        catch (Exception)
+        {
+            return false; // dismissed — same as Cancel
+        }
+        if (choice != 1)
+            return false;
+
+        // Type the command at the prompt (no newline — the user presses Enter),
+        // and bring the Terminal forward and focused.
+        session.Send(command);
+        ShowBottomTab(terminalPad.Widget);
+        terminalPad.FocusTerminal();
+        ShowStatus("Run the pasted command in the Terminal (Enter, then your password)…");
+        return true;
+    }
+
+    // Polls the device until the check holds, the session ends, or the wait cap
+    // is reached. The check runs its own exec channel, independent of whatever
+    // the user is doing in the interactive Terminal.
+    async Task<bool> PollUntilAsync(SshTerminalSession session, Func<bool> satisfied)
+    {
+        const int intervalMs = 2000;
+        const int maxAttempts = 150; // ~5 minutes, a backstop; reconnecting also cancels
+        for (var attempt = 0; attempt < maxAttempts; attempt++)
+        {
+            await Task.Delay(intervalMs);
+            try
+            {
+                if (await Task.Run(satisfied))
+                    return true;
+            }
+            catch (Exception)
+            {
+                return false; // the session went away (e.g. the user reconnected)
+            }
+        }
+        ShowStatus("Timed out waiting for the command to run — reconnect to try again.");
+        return false;
+    }
+
+    // The closing step when a group change was made: it only takes effect in a
+    // fresh session, so the user logs off and reconnects. Just an OK button.
+    async Task ShowReconnectPromptAsync()
+    {
+        ShowStatus("Device prepared — type exit in the Terminal, then reconnect to finish.");
+        var alert = Gtk.AlertDialog.NewWithProperties(Array.Empty<GObject.ConstructArgument>());
+        alert.SetMessage("The device is prepared for SSH debugging.");
+        alert.SetDetail("Type `exit` in the Terminal to log off, then reconnect (Tools > SSH to Device) so the new group membership takes effect.");
+        alert.SetModal(true);
+        alert.SetButtons(new[] { "OK" });
+        try
+        {
+            await alert.ChooseAsync(window);
+        }
+        catch (Exception)
+        {
+            // Dismissed — the same instruction is on the status bar.
+        }
+    }
+
+    // The device-ready summary: manufacturer/model, resolution, OS, and .NET
+    // version. Resolution reads from the known-device catalog in the device's
+    // native orientation (e.g. "Portrait 800 x 1280"); an unknown device
+    // shows "unknown / unknown" and "unknown".
+    void ShowFrameBufferDeviceReadyDialog(
+        SshTerminalSession session, SshDeviceIdentity identity,
+        KnownFrameBufferDevice? known, string? dotnetProbeOutput)
+    {
+        string resolution;
+        if (known != null)
+        {
+            var screen = FrameBufferResolutionInfo.Get(known.Screen);
+            resolution = $"{known.NativeOrientation} " +
+                $"{screen.GetWidth(known.NativeOrientation)} x {screen.GetHeight(known.NativeOrientation)}";
+        }
+        else
+        {
+            resolution = "unknown";
+        }
+
+        var versions = DotnetRuntimeProbe.GetRuntimeVersions(dotnetProbeOutput);
+        var dotnetVersion = versions.Count > 0 ? string.Join(", ", versions.Distinct()) : "unknown";
+
+        // "WinBook TW700", or a single "unknown" when neither was captured
+        // (rather than the doubled "unknown unknown").
+        var manufacturerModel =
+            identity.Vendor == SshDeviceIdentity.UnknownValue && identity.Model == SshDeviceIdentity.UnknownValue
+                ? "unknown"
+                : $"{identity.Vendor} {identity.Model}";
+
+        new FrameBufferDeviceReadyDialog(
+            window,
+            session.DisplayName,
+            manufacturerModel,
+            resolution,
+            identity.OperatingSystem,
+            dotnetVersion).Present();
+    }
+
+    // With the FrameBuffer device connected and ready, point Run/Debug at the
+    // open application's Linux frame-buffer head: the user flagged this device
+    // as the FrameBuffer target, so that head becomes the startup project,
+    // overriding any current choice (the device-first intent). Does nothing
+    // unless a CodeBrix.Platform solution with a frame-buffer head is open.
+    void AutoSelectFrameBufferStartup()
+    {
+        if (IdeApp.CurrentSolution is not { IsCodeBrixPlatformApplication: true } solution)
+            return;
+        var head = solution.Projects.FirstOrDefault(project =>
+            project.IsExecutable && StartupHeadPolicy.IsFrameBufferHead(project.Name));
+        if (head == null)
+            return;
+        if (string.Equals(IdePreferences.StartupProject.Value, (string) head.FileName, StringComparison.Ordinal))
+            return; // already the startup project — nothing to change
+
+        IdePreferences.StartupProject.Value = (string) head.FileName;
+        solutionPad.RefreshStartupProject();
+        if (IdeApp.GetStartupProject(solution) is { } startup)
+            ShowStatus($"Set {startup.Name} as the startup project for the FrameBuffer device.");
+    }
+
+    // The device has no usable .NET runtime: offer to put one on it. Returns
+    // whether .NET is ready afterward and, if so, the confirming probe output
+    // (for the device-ready summary's version line).
+    async Task<(bool Ready, string? ProbeOutput)> OfferDotnetInstallAsync(SshTerminalSession session)
+    {
+        var alert = Gtk.AlertDialog.NewWithProperties(Array.Empty<GObject.ConstructArgument>());
+        alert.SetMessage("The device does not appear to have .NET installed.");
+        alert.SetDetail($"Install the .NET Runtime (latest .NET 10) on {session.DisplayName}?");
+        alert.SetModal(true);
+        alert.SetButtons(new[] { "No", "Install .NET Runtime" });
+        alert.SetCancelButton(0);
+        alert.SetDefaultButton(1);
+        int choice;
+        try
+        {
+            choice = await alert.ChooseAsync(window);
+        }
+        catch (Exception)
+        {
+            return (false, null); // dismissed (Esc, window close) — same as No
+        }
+        return choice == 1
+            ? await InstallDotnetRuntimeAsync(session)
+            : (false, null);
+    }
+
+    // Installs the .NET 10 runtime on the device with Microsoft's
+    // dotnet-install.sh, entirely inside the user's home (no root): the
+    // script lands in ~/.cache/codebrix-develop and the runtime in ~/.dotnet
+    // — the same path the probe already checks. Two unprivileged
+    // prerequisites are gated first, because the script cannot supply them
+    // itself: a downloader (it uses curl or wget for the runtime tarball) and
+    // the ICU library (a non-optional native dependency). A missing one is
+    // the user's to install; we say which and stop.
+    async Task<(bool Ready, string? ProbeOutput)> InstallDotnetRuntimeAsync(SshTerminalSession session)
+    {
+        const string scriptDir = "$HOME/.cache/codebrix-develop";
+        const string scriptPath = "$HOME/.cache/codebrix-develop/dotnet-install.sh";
+        const string scriptUrl = "https://dot.net/v1/dotnet-install.sh";
+        try
+        {
+            ShowStatus($"Preparing to install the .NET Runtime on {session.DisplayName}…");
+
+            // dotnet-install.sh fetches the runtime tarball with curl or wget;
+            // without one it cannot run at all.
+            var (_, downloaderOutput) = await Task.Run(() => session.RunCommand(
+                "command -v curl >/dev/null 2>&1 && echo curl || " +
+                "{ command -v wget >/dev/null 2>&1 && echo wget || echo none; }"));
+            var downloader = downloaderOutput.Trim();
+            if (downloader is not ("curl" or "wget"))
+            {
+                await ShowInstallBlockedAsync(
+                    "Installing .NET needs a download tool.",
+                    "Neither curl nor wget is on the device. Run `sudo apt install curl` on the device, then try again.");
+                return (false, null);
+            }
+
+            // The ICU check, unprivileged: ldconfig -p prints the loader's
+            // cache, so a hit means the runtime will resolve libicu. ldconfig
+            // lives in /sbin, off a non-login shell's PATH — call it by path.
+            var (icuExit, icuOutput) = await Task.Run(() =>
+                session.RunCommand("/sbin/ldconfig -p 2>/dev/null | grep -i libicu"));
+            if (icuExit != 0 || string.IsNullOrWhiteSpace(icuOutput))
+            {
+                await ShowInstallBlockedAsync(
+                    ".NET needs the ICU library, which isn't installed.",
+                    "Run `sudo apt install libicu-dev` on the device, then try again.");
+                return (false, null);
+            }
+
+            // Fetch the script into a home scratch dir. The whole chain's
+            // output (including stderr) is captured so a failure is diagnosable.
+            ShowStatus($"Downloading the .NET install script to {session.DisplayName}…");
+            var fetch = downloader == "curl"
+                ? $"curl -fsSL {scriptUrl} -o \"{scriptPath}\""
+                : $"wget -qO \"{scriptPath}\" {scriptUrl}";
+            var (fetchExit, fetchOutput) = await Task.Run(() => session.RunCommand(
+                $"{{ mkdir -p \"{scriptDir}\" && {fetch} && chmod +x \"{scriptPath}\"; }} 2>&1"));
+            if (fetchExit != 0)
+            {
+                LoggingService.LogError(
+                    $"dotnet-install.sh download failed on {session.DisplayName} (exit {Describe(fetchExit)}):\n{fetchOutput}");
+                await ShowInstallBlockedAsync(
+                    "The .NET install script could not be downloaded.",
+                    "Check the device's internet access and try again — details are in the IDE Log.");
+                return (false, null);
+            }
+
+            // Run it: the shared runtime only, into ~/.dotnet, leaving the
+            // shell profile untouched (we invoke dotnet by full path anyway).
+            ShowStatus($"Installing the .NET Runtime on {session.DisplayName}… this can take a minute.");
+            var (installExit, installOutput) = await Task.Run(() => session.RunCommand(
+                $"bash \"{scriptPath}\" --channel 10.0 --runtime dotnet --install-dir \"$HOME/.dotnet\" --no-path 2>&1"));
+            LoggingService.LogInfo(
+                $".NET install script output on {session.DisplayName} (exit {Describe(installExit)}):\n{installOutput.TrimEnd()}");
+
+            // Confirm with the same probe — it finds ~/.dotnet/dotnet through
+            // its own fallback chain.
+            var (probeExit, probeOutput) = await Task.Run(() => session.RunCommand(DotnetRuntimeProbe.Command));
+            if (DotnetRuntimeProbe.IndicatesInstalled(probeExit, probeOutput))
+            {
+                LoggingService.LogInfo($".NET runtimes now on {session.DisplayName}:\n{probeOutput.TrimEnd()}");
+                ShowStatus($".NET Runtime installed on {session.DisplayName}.");
+                return (true, probeOutput);
+            }
+
+            LoggingService.LogError(
+                $".NET install did not produce a usable runtime on {session.DisplayName} (exit {Describe(probeExit)}):\n{probeOutput}");
+            ShowStatus($".NET Runtime install could not be confirmed on {session.DisplayName} — see the IDE Log.");
+            return (false, null);
+        }
+        catch (Exception ex)
+        {
+            LoggingService.LogError(".NET Runtime installation failed", ex);
+            ShowStatus(".NET Runtime installation failed — see the IDE Log.");
+            return (false, null);
+        }
+    }
+
+    // A prerequisite the user must satisfy themselves: name it, point at the
+    // fix, and stop. The status bar keeps the headline after the dialog closes.
+    async Task ShowInstallBlockedAsync(string message, string detail)
+    {
+        LoggingService.LogWarning($".NET install cannot continue: {message} {detail}");
+        ShowStatus(message);
+        var alert = Gtk.AlertDialog.NewWithProperties(Array.Empty<GObject.ConstructArgument>());
+        alert.SetMessage(message);
+        alert.SetDetail(detail);
+        alert.SetModal(true);
+        alert.SetButtons(new[] { "OK" });
+        try
+        {
+            await alert.ChooseAsync(window);
+        }
+        catch (Exception)
+        {
+            // Dismissed — nothing more to do; the message is on the status bar.
+        }
+    }
+
+    static string Describe(int? exitStatus) => exitStatus?.ToString() ?? "none";
 
     void ShowNewApplicationDialog()
     {

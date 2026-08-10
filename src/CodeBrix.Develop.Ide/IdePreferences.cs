@@ -139,6 +139,125 @@ public static class IdePreferences
         ConfigurationProperty.Create("CodeBrix.Develop.Ide.FrameBuffer.HardwareKeyboard", false);
 
     /// <summary>
+    /// The remembered "Hostname/address" of the Tools &gt; SSH to Device
+    /// dialog: a host name or address, optionally with a ":port" suffix
+    /// (see <see cref="Core.Remote.SshHostEndpoint"/>).
+    /// </summary>
+    public static readonly ConfigurationProperty<string> SshDeviceHost =
+        ConfigurationProperty.Create("CodeBrix.Develop.Ide.SshDevice.Host", "");
+
+    /// <summary>The remembered "User" of the Tools &gt; SSH to Device dialog.</summary>
+    public static readonly ConfigurationProperty<string> SshDeviceUser =
+        ConfigurationProperty.Create("CodeBrix.Develop.Ide.SshDevice.User", "");
+
+    /// <summary>
+    /// The remembered "Password" of the Tools &gt; SSH to Device dialog.
+    /// Stored as plainly as every other option — options.sqlite (and its
+    /// automatic backups) are not an encrypted store, by design.
+    /// </summary>
+    public static readonly ConfigurationProperty<string> SshDevicePassword =
+        ConfigurationProperty.Create("CodeBrix.Develop.Ide.SshDevice.Password", "");
+
+    /// <summary>
+    /// Whether the SSH device stands in for the emulated frame-buffer device
+    /// when a .LinuxFrameBuffer head is the startup project. With this on, a
+    /// successful connection also runs the device-identification commands
+    /// that fill the SshDevice identity properties below.
+    /// </summary>
+    public static readonly ConfigurationProperty<bool> SshDeviceUseAsFrameBuffer =
+        ConfigurationProperty.Create("CodeBrix.Develop.Ide.SshDevice.UseAsFrameBuffer", false);
+
+    /// <summary>
+    /// Whether the SSH FrameBuffer device is also prepared for on-device
+    /// debugging. Only meaningful with <see cref="SshDeviceUseAsFrameBuffer"/>
+    /// on; a connection with this set checks the device's group membership and
+    /// console getty before the device-ready dialog, and walks the user through
+    /// the one-time sudo provisioning if needed.
+    /// </summary>
+    public static readonly ConfigurationProperty<bool> SshDeviceEnableDebugging =
+        ConfigurationProperty.Create("CodeBrix.Develop.Ide.SshDevice.EnableDebugging", false);
+
+    /// <summary>
+    /// The DMI hardware vendor the most recently identified SSH device
+    /// reported (e.g. "WinBook"), "unknown" when it could not be captured,
+    /// or "" before any device was ever identified. Describes ACTUAL
+    /// hardware — fully separate from the FrameBuffer.* emulation settings.
+    /// </summary>
+    public static readonly ConfigurationProperty<string> SshDeviceVendor =
+        ConfigurationProperty.Create("CodeBrix.Develop.Ide.SshDevice.Vendor", "");
+
+    /// <summary>The identified device's DMI model (e.g. "TW700"), or "unknown".</summary>
+    public static readonly ConfigurationProperty<string> SshDeviceModel =
+        ConfigurationProperty.Create("CodeBrix.Develop.Ide.SshDevice.Model", "");
+
+    /// <summary>
+    /// The identified device's operating system (e.g. "Debian GNU/Linux 13
+    /// (trixie)"), or "unknown".
+    /// </summary>
+    public static readonly ConfigurationProperty<string> SshDeviceOperatingSystem =
+        ConfigurationProperty.Create("CodeBrix.Develop.Ide.SshDevice.OperatingSystem", "");
+
+    /// <summary>
+    /// The identified device's kernel (e.g. "Linux 6.12.101+deb13-amd64"),
+    /// or "unknown".
+    /// </summary>
+    public static readonly ConfigurationProperty<string> SshDeviceKernel =
+        ConfigurationProperty.Create("CodeBrix.Develop.Ide.SshDevice.Kernel", "");
+
+    /// <summary>
+    /// The identified device's architecture in systemd spelling (e.g.
+    /// "x86-64"), or "unknown".
+    /// </summary>
+    public static readonly ConfigurationProperty<string> SshDeviceArchitecture =
+        ConfigurationProperty.Create("CodeBrix.Develop.Ide.SshDevice.Architecture", "");
+
+    /// <summary>
+    /// The identified device's /etc/os-release ID (e.g. "debian"), "unknown"
+    /// when it could not be captured, or "" before any device was identified.
+    /// </summary>
+    public static readonly ConfigurationProperty<string> SshDeviceOsId =
+        ConfigurationProperty.Create("CodeBrix.Develop.Ide.SshDevice.OsId", "");
+
+    /// <summary>
+    /// The identified device's /etc/os-release ID_LIKE family (e.g. "debian"
+    /// on Ubuntu), or "unknown" (Debian itself carries no ID_LIKE).
+    /// </summary>
+    public static readonly ConfigurationProperty<string> SshDeviceOsIdLike =
+        ConfigurationProperty.Create("CodeBrix.Develop.Ide.SshDevice.OsIdLike", "");
+
+    /// <summary>
+    /// The identified device's /etc/os-release VERSION_ID (e.g. "13"), or
+    /// "unknown".
+    /// </summary>
+    public static readonly ConfigurationProperty<string> SshDeviceOsVersionId =
+        ConfigurationProperty.Create("CodeBrix.Develop.Ide.SshDevice.OsVersionId", "");
+
+    /// <summary>
+    /// The identified device's /etc/os-release VERSION_CODENAME (e.g.
+    /// "trixie"), or "unknown".
+    /// </summary>
+    public static readonly ConfigurationProperty<string> SshDeviceOsVersionCodename =
+        ConfigurationProperty.Create("CodeBrix.Develop.Ide.SshDevice.OsVersionCodename", "");
+
+    /// <summary>
+    /// The identified device's screen as a <see cref="FrameBufferResolution"/>
+    /// member name (e.g. "SevenInch800x1280") when the device is in the
+    /// known-device catalog; "" when it is not — nothing reads a screen the
+    /// catalog could not vouch for.
+    /// </summary>
+    public static readonly ConfigurationProperty<string> SshDeviceScreen =
+        ConfigurationProperty.Create("CodeBrix.Develop.Ide.SshDevice.Screen", "");
+
+    /// <summary>
+    /// The identified device's native orientation as a
+    /// <see cref="FrameBufferOrientation"/> member name (e.g. "Portrait" for
+    /// the WinBook TW700) when the device is in the known-device catalog;
+    /// "" when it is not.
+    /// </summary>
+    public static readonly ConfigurationProperty<string> SshDeviceScreenOrientation =
+        ConfigurationProperty.Create("CodeBrix.Develop.Ide.SshDevice.ScreenOrientation", "");
+
+    /// <summary>
     /// The remembered LONGER side of the frame-buffer emulator's screen area (the
     /// window is this plus its bezel); 0 until it has been shown once. Stored
     /// orientation-independently as a long and a short side — the same way

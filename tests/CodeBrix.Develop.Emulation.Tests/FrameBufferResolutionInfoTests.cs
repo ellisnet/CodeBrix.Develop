@@ -11,6 +11,8 @@ public class FrameBufferResolutionInfoTests
     [Theory]
     [InlineData(FrameBufferResolution.FiveInch720x1280, "720 x 1280 pixels (5-inch)")]
     [InlineData(FrameBufferResolution.SevenInch720x1280, "720 x 1280 pixels (7-inch)")]
+    [InlineData(FrameBufferResolution.SevenInch800x1280, "800 x 1280 pixels (7-inch)")]
+    [InlineData(FrameBufferResolution.EightInch800x1280, "800 x 1280 pixels (8-inch)")]
     [InlineData(FrameBufferResolution.TenInch1200x1920, "1200 x 1920 pixels (10-inch)")]
     [InlineData(FrameBufferResolution.Hd1080x1920, "1080 x 1920 pixels (HD)")]
     public void Portrait_labels_lead_with_the_short_side(FrameBufferResolution resolution, string expected)
@@ -25,6 +27,8 @@ public class FrameBufferResolutionInfoTests
     [Theory]
     [InlineData(FrameBufferResolution.FiveInch720x1280, "1280 x 720 pixels (5-inch)")]
     [InlineData(FrameBufferResolution.SevenInch720x1280, "1280 x 720 pixels (7-inch)")]
+    [InlineData(FrameBufferResolution.SevenInch800x1280, "1280 x 800 pixels (7-inch)")]
+    [InlineData(FrameBufferResolution.EightInch800x1280, "1280 x 800 pixels (8-inch)")]
     [InlineData(FrameBufferResolution.TenInch1200x1920, "1920 x 1200 pixels (10-inch)")]
     [InlineData(FrameBufferResolution.Hd1080x1920, "1920 x 1080 pixels (HD)")]
     public void Landscape_labels_lead_with_the_long_side(FrameBufferResolution resolution, string expected)
@@ -73,6 +77,8 @@ public class FrameBufferResolutionInfoTests
     [Theory]
     [InlineData(FrameBufferResolution.FiveInch720x1280, 360, 640)]
     [InlineData(FrameBufferResolution.SevenInch720x1280, 360, 640)]
+    [InlineData(FrameBufferResolution.SevenInch800x1280, 400, 640)]
+    [InlineData(FrameBufferResolution.EightInch800x1280, 400, 640)]
     [InlineData(FrameBufferResolution.TenInch1200x1920, 400, 640)]
     [InlineData(FrameBufferResolution.Hd1080x1920, 360, 640)]
     public void Portrait_default_window_size_is_640_tall_and_proportional(
@@ -207,7 +213,7 @@ public class FrameBufferResolutionInfoTests
 
     [Theory]
     [InlineData(-1)]
-    [InlineData(4)]
+    [InlineData(6)]
     public void An_out_of_range_position_falls_back_to_the_default_screen(int index)
     {
         //Act

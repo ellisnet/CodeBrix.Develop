@@ -61,6 +61,7 @@ public static class ApplicationFontCatalog
     {
         new ApplicationFontChoice("Open Sans", TemplatePackageId),
         new ApplicationFontChoice("Roboto", "CodeBrix.Platform.Fonts.Roboto.OflLicenseForever"),
+        new ApplicationFontChoice("Roboto Mono", "CodeBrix.Platform.Fonts.RobotoMono.OflLicenseForever"),
         new ApplicationFontChoice("Merriweather", "CodeBrix.Platform.Fonts.Merriweather.OflLicenseForever"),
     };
 
