@@ -61,13 +61,45 @@ public class Solution
         projects.FirstOrDefault(p => p.IsExecutable && !p.IsTestProject)
         ?? projects.FirstOrDefault(p => p.IsExecutable);
 
+    /// <summary>The platform package every packaged application references.</summary>
+    const string PlatformPackageId = "CodeBrix.Platform.ApacheLicenseForever";
+
     /// <summary>
-    /// Whether this solution is a CodeBrix.Platform application: any project
-    /// referencing the CodeBrix.Platform.ApacheLicenseForever package is a
-    /// guaranteed marker (typically the .Core project).
+    /// The suffix of the application's core project, the one project a
+    /// from-source application points at the platform UI project from.
+    /// </summary>
+    const string CoreProjectSuffix = ".Core.csproj";
+
+    /// <summary>
+    /// The platform UI project a from-source application references in place
+    /// of the <see cref="PlatformPackageId"/> package.
+    /// </summary>
+    const string PlatformFromSourceProjectFileName = "Platform.UI.Skia.csproj";
+
+    /// <summary>
+    /// Whether this solution is a CodeBrix.Platform application, by either of
+    /// two markers:
+    /// <list type="number">
+    /// <item>any project referencing the CodeBrix.Platform.ApacheLicenseForever
+    /// package (typically the .Core project) — how a packaged application,
+    /// including every generated one, consumes the platform; or</item>
+    /// <item>a *.Core.csproj project referencing Platform.UI.Skia.csproj — how
+    /// a development sample inside the CodeBrix.Platform repo itself consumes
+    /// the platform, from source, with no platform package reference at
+    /// all.</item>
+    /// </list>
     /// </summary>
     public bool IsCodeBrixPlatformApplication =>
-        projects.Any(p => p.HasPackageReference("CodeBrix.Platform.ApacheLicenseForever"));
+        projects.Any(p => p.HasPackageReference(PlatformPackageId))
+        || projects.Any(IsPlatformFromSourceCoreProject);
+
+    /// <summary>
+    /// Whether the project is an application core project consuming the
+    /// platform from source rather than from its NuGet package.
+    /// </summary>
+    static bool IsPlatformFromSourceCoreProject(DotNetProject project) =>
+        project.FileName.FileName.EndsWith(CoreProjectSuffix, StringComparison.OrdinalIgnoreCase)
+        && project.HasProjectReference(PlatformFromSourceProjectFileName);
 
     /// <summary>
     /// Loads a solution from a .sln, .slnx, or .csproj file (a single project

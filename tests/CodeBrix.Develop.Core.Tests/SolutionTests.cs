@@ -76,6 +76,71 @@ public class SolutionTests : IDisposable
     }
 
     [Fact]
+    public void Solution_whose_core_project_references_the_platform_ui_project_is_a_codebrix_platform_application()
+    {
+        //Arrange — a development sample inside the CodeBrix.Platform repo:
+        //no platform package anywhere, the platform consumed from source with
+        //Windows-style separators in the Include, as the real samples write it.
+        WriteFile("App.Core/App.Core.csproj", """
+            <Project Sdk="Microsoft.NET.Sdk">
+              <PropertyGroup>
+                <TargetFramework>net10.0</TargetFramework>
+              </PropertyGroup>
+              <ItemGroup>
+                <PackageReference Include="SkiaSharp.Skottie" Version="4.151.0" />
+              </ItemGroup>
+              <ItemGroup>
+                <ProjectReference Include="..\..\..\..\src\Platform.UI\Platform.UI.Skia.csproj" />
+                <ProjectReference Include="..\App.Encryption\App.Encryption.csproj" />
+              </ItemGroup>
+            </Project>
+            """);
+        var slnPath = WriteFile("App.slnx", """
+            <Solution>
+              <Project Path="App.Core/App.Core.csproj" />
+            </Solution>
+            """);
+
+        //Act
+        var solution = Solution.Load(slnPath);
+
+        //Assert
+        solution.Projects[0].ProjectReferences.Count.Should().Be(2);
+        solution.Projects[0].HasProjectReference("Platform.UI.Skia.csproj").Should().BeTrue();
+        solution.Projects[0].HasPackageReference("CodeBrix.Platform.ApacheLicenseForever").Should().BeFalse();
+        solution.IsCodeBrixPlatformApplication.Should().BeTrue();
+    }
+
+    [Fact]
+    public void Solution_referencing_the_platform_ui_project_outside_a_core_project_is_not_a_codebrix_platform_application()
+    {
+        //Arrange — the platform's own projects reference each other from
+        //source; only a *.Core.csproj marks an application.
+        WriteFile("Lib/Lib.csproj", """
+            <Project Sdk="Microsoft.NET.Sdk">
+              <PropertyGroup>
+                <TargetFramework>net10.0</TargetFramework>
+              </PropertyGroup>
+              <ItemGroup>
+                <ProjectReference Include="..\..\src\Platform.UI\Platform.UI.Skia.csproj" />
+              </ItemGroup>
+            </Project>
+            """);
+        var slnPath = WriteFile("Plain.slnx", """
+            <Solution>
+              <Project Path="Lib/Lib.csproj" />
+            </Solution>
+            """);
+
+        //Act
+        var solution = Solution.Load(slnPath);
+
+        //Assert
+        solution.Projects[0].HasProjectReference("Platform.UI.Skia.csproj").Should().BeTrue();
+        solution.IsCodeBrixPlatformApplication.Should().BeFalse();
+    }
+
+    [Fact]
     public void Solution_without_the_platform_package_is_not_a_codebrix_platform_application()
     {
         //Arrange

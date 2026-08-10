@@ -84,14 +84,141 @@ public class DeviceProvisioningTests
             .Select(dependency => dependency.AptPackage)
             .Should().BeEquivalentTo(new[] { "libfontconfig1", "libicu-dev" });
 
+    // The real vtconsole listing from the WinBook TW802: a dummy console that
+    // never owns the screen, and the framebuffer console that does. The index
+    // is not fixed, which is why the console is matched by name.
+    const string AttachedConsole = """
+        /sys/class/vtconsole/vtcon0 0
+        /sys/class/vtconsole/vtcon1 1
+        """;
+
+    const string DetachedConsole = """
+        /sys/class/vtconsole/vtcon0 0
+        /sys/class/vtconsole/vtcon1 0
+        """;
+
+    [Fact]
+    public void IsFrameBufferConsoleAttached_detects_a_console_still_owning_the_screen()
+        => DeviceProvisioning.IsFrameBufferConsoleAttached(AttachedConsole).Should().BeTrue();
+
+    [Fact]
+    public void IsFrameBufferConsoleAttached_accepts_a_detached_console()
+        => DeviceProvisioning.IsFrameBufferConsoleAttached(DetachedConsole).Should().BeFalse();
+
+    [Fact]
+    public void IsFrameBufferConsoleAttached_reports_false_when_no_console_is_listed()
+    {
+        //Arrange & Act & Assert — a device with no framebuffer console has
+        //nothing to detach, so a run must not be blocked on it.
+        DeviceProvisioning.IsFrameBufferConsoleAttached("").Should().BeFalse();
+        DeviceProvisioning.IsFrameBufferConsoleAttached(null).Should().BeFalse();
+        DeviceProvisioning.IsFrameBufferConsoleAttached("garbage").Should().BeFalse();
+    }
+
+    [Fact]
+    public void IsServiceActive_reads_the_systemctl_is_active_result()
+    {
+        DeviceProvisioning.IsServiceActive("active").Should().BeTrue();
+        DeviceProvisioning.IsServiceActive("active\n").Should().BeTrue();
+        DeviceProvisioning.IsServiceActive("inactive").Should().BeFalse();
+        DeviceProvisioning.IsServiceActive("").Should().BeFalse();
+        DeviceProvisioning.IsServiceActive(null).Should().BeFalse();
+    }
+
+    [Fact]
+    public void Unmasking_the_login_also_starts_it()
+    {
+        //Arrange & Act & Assert — masking used --now, which stopped the unit,
+        //so unmasking alone would leave the screen blank until a reboot.
+        DeviceProvisioning.UnmaskGettyCommand
+            .Should().Be("sudo systemctl unmask getty@tty1 && sudo systemctl start getty@tty1");
+    }
+
+    [Fact]
+    public void The_console_commands_match_the_framebuffer_console_by_name()
+    {
+        //Arrange & Act & Assert — the vtcon index varies by device, so every
+        //console command selects on the name and writes only the bind flag.
+        DeviceProvisioning.FrameBufferConsoleStateCommand.Should().Contain("frame buffer");
+        DeviceProvisioning.DetachFrameBufferConsoleCommand.Should().Contain("echo 0 > \"$d/bind\"");
+        DeviceProvisioning.AttachFrameBufferConsoleCommand.Should().Contain("echo 1 > \"$d/bind\"");
+        //Nothing on disk changes: a reboot alone restores the console.
+        DeviceProvisioning.DetachFrameBufferConsoleCommand.Should().NotContain("grub");
+    }
+
+    // The real /proc/mounts root line from the WinBook TW802 in the state that
+    // failed a deploy: root mounted ro after systemd-remount-fs died.
+    const string ReadOnlyRootMounts = """
+        proc /proc proc rw,nosuid,nodev,noexec,relatime 0 0
+        /dev/mmcblk1p2 / ext4 ro,relatime 0 0
+        /dev/mmcblk1p1 /boot/efi vfat rw,relatime,fmask=0077 0 0
+        """;
+
+    const string WritableRootMounts = """
+        proc /proc proc rw,nosuid,nodev,noexec,relatime 0 0
+        /dev/mmcblk1p2 / ext4 rw,relatime 0 0
+        /dev/mmcblk1p1 /boot/efi vfat rw,relatime,fmask=0077 0 0
+        """;
+
+    [Fact]
+    public void IsRootFilesystemReadOnly_detects_a_read_only_root()
+        => DeviceProvisioning.IsRootFilesystemReadOnly(ReadOnlyRootMounts).Should().BeTrue();
+
+    [Fact]
+    public void IsRootFilesystemReadOnly_accepts_a_writable_root()
+        => DeviceProvisioning.IsRootFilesystemReadOnly(WritableRootMounts).Should().BeFalse();
+
+    [Fact]
+    public void IsRootFilesystemReadOnly_ignores_read_only_mounts_that_are_not_the_root()
+    {
+        //Arrange — a writable root beside read-only mounts of its own; only
+        //the root mount decides whether the deploy can write.
+        var mounts = """
+            /dev/mmcblk1p2 / ext4 rw,relatime 0 0
+            /dev/sr0 /media/cdrom iso9660 ro,relatime 0 0
+            /dev/loop0 /snap/core squashfs ro,nodev,relatime 0 0
+            """;
+
+        //Act & Assert
+        DeviceProvisioning.IsRootFilesystemReadOnly(mounts).Should().BeFalse();
+    }
+
+    [Fact]
+    public void IsRootFilesystemReadOnly_does_not_mistake_other_options_for_ro()
+    {
+        //Arrange — "relatime" and "errors=remount-ro" both contain "ro" as a
+        //substring; only a standalone "ro" option means read-only.
+        var mounts = "/dev/mmcblk1p2 / ext4 rw,relatime,errors=remount-ro 0 0";
+
+        //Act & Assert
+        DeviceProvisioning.IsRootFilesystemReadOnly(mounts).Should().BeFalse();
+    }
+
+    [Fact]
+    public void IsRootFilesystemReadOnly_reports_false_when_the_listing_is_unusable()
+    {
+        //Arrange & Act & Assert — an unreadable or root-less listing must not
+        //block a run that would otherwise have worked.
+        DeviceProvisioning.IsRootFilesystemReadOnly("").Should().BeFalse();
+        DeviceProvisioning.IsRootFilesystemReadOnly(null).Should().BeFalse();
+        DeviceProvisioning.IsRootFilesystemReadOnly("proc /proc proc rw 0 0").Should().BeFalse();
+        DeviceProvisioning.IsRootFilesystemReadOnly("garbage").Should().BeFalse();
+    }
+
+    [Fact]
+    public void The_remount_command_makes_the_root_filesystem_writable()
+    {
+        DeviceProvisioning.RemountRootReadWriteCommand.Should().Be("sudo mount -o remount,rw /");
+        DeviceProvisioning.MountedFilesystemsCommand.Should().Be("cat /proc/mounts");
+    }
+
     [Fact]
     public void Command_builders_use_the_given_user_and_the_console_tty()
     {
         DeviceProvisioning.AddVideoInputGroupsCommand("debian")
             .Should().Be("sudo usermod -aG video,input debian");
-        DeviceProvisioning.MaskGettyCommand
-            .Should().Be("sudo systemctl mask --now getty@tty1");
         DeviceProvisioning.PersistentGroupsCommand("debian").Should().Be("id -nG debian");
         DeviceProvisioning.GettyEnabledCommand.Should().Be("systemctl is-enabled getty@tty1");
+        DeviceProvisioning.GettyActiveCommand.Should().Be("systemctl is-active getty@tty1");
     }
 }

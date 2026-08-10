@@ -91,6 +91,22 @@ public class DotNetProject
         => PackageReferences.Any(reference => string.Equals(reference.Id, packageId, StringComparison.OrdinalIgnoreCase));
 
     /// <summary>
+    /// The projects this project references with &lt;ProjectReference&gt;
+    /// items, as full paths resolved against the project folder, in
+    /// declaration order.
+    /// </summary>
+    public IReadOnlyList<FilePath> ProjectReferences { get; private set; } = Array.Empty<FilePath>();
+
+    /// <summary>
+    /// Whether the project has a ProjectReference whose target is the named
+    /// project file (e.g. "Platform.UI.Skia.csproj"). Only the file name is
+    /// compared — where the referenced project lives on disk varies with the
+    /// relative depth of the referencing project.
+    /// </summary>
+    public bool HasProjectReference(string projectFileName)
+        => ProjectReferences.Any(reference => string.Equals(reference.FileName, projectFileName, StringComparison.OrdinalIgnoreCase));
+
+    /// <summary>
     /// Whether this is a test project the IDE can discover and run tests in:
     /// an xUnit.net v3 project, whose xunit.v3 package makes the build output
     /// a self-executing test binary.
@@ -146,6 +162,7 @@ public class DotNetProject
         var linkedFiles = new List<LinkedProjectFile>();
         var declaredFolders = new List<string>();
         var packageReferences = new List<ProjectPackageReference>();
+        var projectReferences = new List<FilePath>();
         foreach (var item in root?.Elements("ItemGroup").Elements() ?? Enumerable.Empty<XElement>())
         {
             var include = item.Attribute("Include")?.Value;
@@ -160,6 +177,12 @@ public class DotNetProject
                     Id = include,
                     Version = item.Attribute("Version")?.Value ?? item.Element("Version")?.Value ?? "",
                 });
+                continue;
+            }
+            if (item.Name.LocalName == "ProjectReference")
+            {
+                projectReferences.Add(new FilePath(
+                    Path.GetFullPath(Path.Combine(project.BaseDirectory, NormalizeRelativePath(include)))));
                 continue;
             }
             if (item.Name.LocalName == "Folder")
@@ -181,6 +204,7 @@ public class DotNetProject
         project.LinkedFiles = linkedFiles;
         project.DeclaredFolders = declaredFolders;
         project.PackageReferences = packageReferences;
+        project.ProjectReferences = projectReferences;
     }
 
     static string GetProperty(IEnumerable<XElement> properties, string name)

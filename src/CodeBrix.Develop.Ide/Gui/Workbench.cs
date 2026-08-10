@@ -86,12 +86,19 @@ public class Workbench
     // emulator). Null when no such device is active; cleared on disconnect.
     SshTerminalSession? activeFrameBufferDevice;
 
+    // The connected FrameBuffer device, set as soon as the SSH session is up —
+    // BEFORE it is identified or provisioned, unlike activeFrameBufferDevice.
+    // Recovering a device whose login prompt was masked must not require
+    // completing a provisioning run first.
+    SshTerminalSession? connectedFrameBufferDevice;
+
     // The app currently running on the active FrameBuffer device, if any.
     RemoteApplication? runningDeviceApp;
 
     Gio.SimpleAction? buildAction, rebuildAction, cleanAction, runAction, stopAction, closeSolutionAction;
     Gio.SimpleAction? debugAction, stepOverAction, stepIntoAction, stepOutAction;
     Gio.SimpleAction? updateCodeBrixPackagesAction, closeEmulatorAction, rotateEmulatorAction;
+    Gio.SimpleAction? reenableLoginPromptAction;
     Gio.SimpleAction? openSolutionFolderAction, openSolutionTerminalAction;
     Gio.SimpleAction? runAllTestsAction, runSelectedTestsAction, debugSelectedTestAction;
     Gio.SimpleAction? runTestAtCaretAction, debugTestAtCaretAction, rediscoverTestsAction;
@@ -410,6 +417,8 @@ public class Workbench
         // Solution-independent: a device connection is about the machine on
         // the desk, not about what is loaded in the IDE.
         AddAction("ssh-to-device", ShowSshToDeviceDialog);
+        reenableLoginPromptAction = AddAction(
+            "reenable-login-prompt", () => _ = ReenableLoginPromptAsync(), null, enabled: false);
         AddAction("about", ShowAbout);
 
         // The MonoDevelop convention: Ctrl+T runs every test in the solution.
@@ -490,6 +499,7 @@ public class Workbench
         toolsMenu.Append("Open Solution _Folder", "app.open-solution-folder");
         toolsMenu.Append("Open Solution _Terminal", "app.open-solution-terminal");
         toolsMenu.Append("SSH to _Device…", "app.ssh-to-device");
+        toolsMenu.Append("Re-enable _Login Prompt", "app.reenable-login-prompt");
         toolsMenu.Append("_Update CodeBrix Package References", "app.update-codebrix-packages");
         toolsMenu.Append("Close _Emulator", "app.close-emulator");
 
@@ -1731,6 +1741,26 @@ public class Workbench
                 return;
             }
 
+            // A read-only device filesystem fails the upload partway through
+            // with an opaque SFTP "Failure"; catch it before copying anything.
+            if (!await EnsureDeviceFilesystemWritableAsync(device))
+            {
+                applicationOutput.AppendLine(
+                    "Canceled: the device's filesystem is mounted read-only, so the application cannot be copied to it.");
+                ShowStatus("Run canceled — the device's filesystem is read-only.");
+                return;
+            }
+
+            // The kernel's framebuffer console draws the blinking cursor into
+            // the same screen the app paints; it has to let go first.
+            if (!await EnsureFrameBufferConsoleDetachedAsync(device))
+            {
+                applicationOutput.AppendLine(
+                    "Canceled: the device's text console still owns its screen, so the application would share it with a blinking cursor.");
+                ShowStatus("Run canceled — the device's text console still owns the screen.");
+                return;
+            }
+
             ShowStatus($"Deploying to {device.DisplayName}…");
             var uploaded = await Task.Run(() =>
             {
@@ -1911,11 +1941,19 @@ public class Workbench
             // A fresh connection replaces any prior device; the new one only
             // becomes the Run/Debug target once it reaches "ready".
             activeFrameBufferDevice = null;
+            connectedFrameBufferDevice = null;
+            reenableLoginPromptAction?.SetEnabled(false);
             terminalPad.AttachSession(session);
             ShowBottomTab(terminalPad.Widget);
             ShowStatus($"SSH connected to {session.DisplayName}");
             if (IdePreferences.SshDeviceUseAsFrameBuffer.Value)
+            {
+                connectedFrameBufferDevice = session;
+                // Independent of identification/provisioning: a device masked
+                // in an earlier session can be recovered the moment it connects.
+                _ = RefreshLoginPromptActionAsync(session);
                 _ = IdentifyFrameBufferDeviceAsync(session);
+            }
         };
         dialog.Present();
     }
@@ -2033,6 +2071,8 @@ public class Workbench
     void OnFrameBufferDeviceDisconnected()
     {
         activeFrameBufferDevice = null;
+        connectedFrameBufferDevice = null;
+        reenableLoginPromptAction?.SetEnabled(false);
         if (runningDeviceApp is { } app)
         {
             runningDeviceApp = null;
@@ -2049,6 +2089,9 @@ public class Workbench
     // never by scraping the terminal — until the command has taken effect. If a
     // command is never run (or the user cancels), the walk stops here and the
     // ready summary is never shown. Running the app as root is never offered.
+    // Nothing here changes the device permanently: every step is either a group
+    // membership or a package install, both of which leave a device that still
+    // boots to a usable login prompt.
     async Task ProvisionDebuggingThenShowReadyAsync(
         SshTerminalSession session, SshDeviceIdentity identity,
         KnownFrameBufferDevice? known, string? dotnetProbeOutput)
@@ -2072,20 +2115,11 @@ public class Workbench
                     return;
             }
 
-            // 2. Masked console getty so the app owns the screen.
-            var gettyState = await RunOnDeviceAsync(session, DeviceProvisioning.GettyEnabledCommand);
-            if (!DeviceProvisioning.IsServiceMasked(gettyState))
-            {
-                if (!await PasteProvisioningCommandAsync(session,
-                        "The device is showing a text login on its screen. Masking it lets your application own the display.",
-                        DeviceProvisioning.MaskGettyCommand))
-                    return;
-                if (!await PollUntilAsync(session, () => DeviceProvisioning.IsServiceMasked(
-                        session.RunCommand(DeviceProvisioning.GettyEnabledCommand).Output)))
-                    return;
-            }
+            // The console is NOT dealt with here: it is detached per run (and
+            // only until the device reboots) by EnsureFrameBufferConsoleDetachedAsync,
+            // so provisioning never leaves the device unable to show a login.
 
-            // 3. Native libraries the app needs (SkiaSharp/fontconfig, ICU,
+            // 2. Native libraries the app needs (SkiaSharp/fontconfig, ICU,
             //    libinput, libxkbcommon). A fresh minimal Debian lacks them;
             //    install the missing ones in one apt command.
             var libraryCache = await RunOnDeviceAsync(session, DeviceProvisioning.SharedLibraryCacheCommand);
@@ -2116,6 +2150,123 @@ public class Workbench
         {
             LoggingService.LogError("SSH debugging provisioning failed", ex);
             ShowStatus("SSH debugging provisioning failed — see the IDE Log.");
+        }
+    }
+
+    // Verifies the device can actually be written to before a deploy starts.
+    // A root filesystem mounted read-only (a failed systemd-remount-fs, or an
+    // ext4 error tripping the fstab errors=remount-ro rule) lets the SSH
+    // session, the probes and the publish all succeed, then fails the upload
+    // on its first new file with nothing but "Failure" to go on. Offers the
+    // remount through the same Paste/Cancel prompt the provisioning walk uses,
+    // then polls until the filesystem really is writable. Returns true when
+    // the deploy may proceed.
+    async Task<bool> EnsureDeviceFilesystemWritableAsync(SshTerminalSession device)
+    {
+        var mounts = await RunOnDeviceAsync(device, DeviceProvisioning.MountedFilesystemsCommand);
+        if (!DeviceProvisioning.IsRootFilesystemReadOnly(mounts))
+            return true;
+
+        LoggingService.LogWarning(
+            $"The filesystem on {device.DisplayName} is mounted read-only; the application cannot be deployed until it is remounted read-write.");
+        if (!await PasteProvisioningCommandAsync(device,
+                "The device's filesystem is mounted read-only, so the application cannot be copied to it.",
+                DeviceProvisioning.RemountRootReadWriteCommand))
+            return false;
+        return await PollUntilAsync(device, () => !DeviceProvisioning.IsRootFilesystemReadOnly(
+            device.RunCommand(DeviceProvisioning.MountedFilesystemsCommand).Output));
+    }
+
+    // Hands the device's screen to the application by detaching the kernel's
+    // framebuffer console — the thing that draws the blinking cursor over a
+    // running app, and would paint kernel messages on top of it. The detach
+    // lasts until the device reboots, so this asks once per device boot and
+    // every later run that boot passes straight through. Nothing on the device
+    // changes on disk: a reboot restores the normal console and login prompt,
+    // which is exactly why the console is detached instead of the login being
+    // masked permanently.
+    async Task<bool> EnsureFrameBufferConsoleDetachedAsync(SshTerminalSession device)
+    {
+        var state = await RunOnDeviceAsync(device, DeviceProvisioning.FrameBufferConsoleStateCommand);
+        if (!DeviceProvisioning.IsFrameBufferConsoleAttached(state))
+            return true;
+
+        if (!await PasteProvisioningCommandAsync(device,
+                "The device's text console is still drawing on its screen — that is the blinking cursor over your application.",
+                DeviceProvisioning.DetachFrameBufferConsoleCommand))
+            return false;
+        return await PollUntilAsync(device, () => !DeviceProvisioning.IsFrameBufferConsoleAttached(
+            device.RunCommand(DeviceProvisioning.FrameBufferConsoleStateCommand).Output));
+    }
+
+    // Tools > Re-enable Login Prompt: puts a device back the way it was found.
+    // Offered whenever a connected FrameBuffer device reports a masked getty —
+    // not only after a provisioning run — because the devices that need it most
+    // are the ones masked in an earlier session, which would otherwise have no
+    // way back short of reinstalling the OS. Restores the console too, when a
+    // run detached it, so the login prompt is actually visible afterwards.
+    async Task ReenableLoginPromptAsync()
+    {
+        if (connectedFrameBufferDevice is not { } device)
+            return;
+        try
+        {
+            var gettyState = await RunOnDeviceAsync(device, DeviceProvisioning.GettyEnabledCommand);
+            if (DeviceProvisioning.IsServiceMasked(gettyState))
+            {
+                if (!await PasteProvisioningCommandAsync(device,
+                        "The device's on-screen text login is masked, so the device shows nothing at boot and cannot be logged into with its own keyboard.",
+                        DeviceProvisioning.UnmaskGettyCommand))
+                    return;
+                if (!await PollUntilAsync(device, () =>
+                        !DeviceProvisioning.IsServiceMasked(
+                            device.RunCommand(DeviceProvisioning.GettyEnabledCommand).Output)
+                        && DeviceProvisioning.IsServiceActive(
+                            device.RunCommand(DeviceProvisioning.GettyActiveCommand).Output)))
+                    return;
+            }
+
+            // A detached console would leave the restored login invisible.
+            var consoleState = await RunOnDeviceAsync(device, DeviceProvisioning.FrameBufferConsoleStateCommand);
+            if (!DeviceProvisioning.IsFrameBufferConsoleAttached(consoleState))
+            {
+                if (!await PasteProvisioningCommandAsync(device,
+                        "The device's text console is detached from its screen, so the login prompt would still not be visible.",
+                        DeviceProvisioning.AttachFrameBufferConsoleCommand))
+                    return;
+                if (!await PollUntilAsync(device, () => DeviceProvisioning.IsFrameBufferConsoleAttached(
+                        device.RunCommand(DeviceProvisioning.FrameBufferConsoleStateCommand).Output)))
+                    return;
+            }
+
+            await RefreshLoginPromptActionAsync(device);
+            ShowStatus($"The login prompt is back on {device.DisplayName}'s screen.");
+        }
+        catch (Exception ex)
+        {
+            LoggingService.LogError("Re-enabling the device login prompt failed", ex);
+            ShowStatus("Re-enabling the login prompt failed — see the IDE Log.");
+        }
+    }
+
+    // Enables Tools > Re-enable Login Prompt only while it has something to do:
+    // a connected FrameBuffer device whose on-screen login is masked.
+    async Task RefreshLoginPromptActionAsync(SshTerminalSession device)
+    {
+        try
+        {
+            var gettyState = await RunOnDeviceAsync(device, DeviceProvisioning.GettyEnabledCommand);
+            var masked = DeviceProvisioning.IsServiceMasked(gettyState);
+            reenableLoginPromptAction?.SetEnabled(masked && connectedFrameBufferDevice == device);
+            if (masked)
+            {
+                LoggingService.LogInfo(
+                    $"The on-screen login on {device.DisplayName} is masked; Tools > Re-enable Login Prompt will restore it.");
+            }
+        }
+        catch (Exception ex)
+        {
+            LoggingService.LogInfo($"Could not read the device's login-prompt state: {ex.Message}");
         }
     }
 

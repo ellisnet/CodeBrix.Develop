@@ -52,7 +52,21 @@ public static class DeviceLaunch
                 continue;
 
             using var stream = File.OpenRead(localPath);
-            sftp.UploadFile(stream, remotePath, canOverride: true);
+            try
+            {
+                sftp.UploadFile(stream, remotePath, canOverride: true);
+            }
+            catch (Exception ex)
+            {
+                // SFTP reports most write failures as a bare "Failure", which
+                // says nothing about which of the publish output's files gave
+                // up. Name it, and name the usual causes.
+                throw new IOException(
+                    $"Could not upload '{relative}' to ~/{remotePath} on the device: {ex.Message}. " +
+                    "The device may be out of disk space, the file may still be held by a running " +
+                    "instance of the app (press Stop first), or it may not be writable by the device user.",
+                    ex);
+            }
             uploaded++;
             onLog?.Invoke($"  ↑ {relative}");
         }
@@ -111,11 +125,18 @@ public static class DeviceLaunch
         // Launch in the background, print the PID on a marker line so stop can
         // kill it precisely, then wait so the channel stays open for the app's
         // lifetime.
+        //
+        // The subshell and the exec matter. Backgrounding a "cd X && app" list
+        // forks a subshell for the WHOLE list, so a bare $! is the SUBSHELL's
+        // pid, not the app's: stopping killed the subshell, reported its 143,
+        // and left the app running on the device's screen. Exec replaces the
+        // subshell with the app itself, so $! is the app, kill reaches the app,
+        // and the exit code reported is the app's own.
         var command = string.Join(" ",
-            $"cd \"$HOME/{remoteAppDir}\" &&",
-            "DOTNET_ROOT=\"$HOME/.dotnet\"",
+            $"( cd \"$HOME/{remoteAppDir}\" &&",
+            "exec env DOTNET_ROOT=\"$HOME/.dotnet\"",
             "CODEBRIX_FRAMEBUFFER_USE_DRM=0",
-            $"\"$HOME/.dotnet/dotnet\" \"{entryDll}\" &",
+            $"\"$HOME/.dotnet/dotnet\" \"{entryDll}\" ) &",
             "__cbpid=$!;",
             $"echo \"{RemoteApplication.PidMarker} $__cbpid\";",
             "wait $__cbpid");
@@ -208,9 +229,21 @@ public sealed class RemoteApplication : IDisposable
         return true;
     }
 
+    // Reported by the stop command so the IDE knows whether the app really
+    // died rather than assuming it did.
+    const string StoppedMarker = "__CODEBRIX_APP_STOPPED__";
+
+    // Blanks the device's screen to black. /dev/fb0 is writable by the video
+    // group the device user is already in, so this needs no sudo. dd stops at
+    // the end of the framebuffer with a write error; that is the expected end
+    // of the copy, not a failure.
+    const string BlankFrameBufferCommand = "dd if=/dev/zero of=/dev/fb0 bs=1M 2>/dev/null; true";
+
     /// <summary>
-    /// Stops the app: kills the remote process (TERM, then KILL after a
-    /// grace), which lets the channel close on its own.
+    /// Stops the app: TERM the remote process, escalate to KILL if it lingers,
+    /// then confirm it is really gone before reporting — and blank the device's
+    /// screen so a stopped application cannot leave a live-looking picture on
+    /// it. The channel closes on its own once the process is dead.
     /// </summary>
     public void Stop()
     {
@@ -221,7 +254,27 @@ public sealed class RemoteApplication : IDisposable
         {
             try
             {
-                session.RunCommand($"kill {pid} 2>/dev/null; sleep 1; kill -9 {pid} 2>/dev/null; true");
+                // TERM, wait up to ~3s for a clean exit, KILL, then report
+                // which of the two actually finished it.
+                var stop = string.Join(" ",
+                    $"kill -TERM {pid} 2>/dev/null;",
+                    $"for _ in $(seq 1 10); do kill -0 {pid} 2>/dev/null || break; sleep 0.3; done;",
+                    $"kill -0 {pid} 2>/dev/null && kill -KILL {pid} 2>/dev/null;",
+                    "sleep 0.3;",
+                    $"kill -0 {pid} 2>/dev/null && echo \"{StoppedMarker} no\" || echo \"{StoppedMarker} yes\";");
+                var output = session.RunCommand(stop).Output ?? "";
+                if (output.Contains($"{StoppedMarker} yes", StringComparison.Ordinal))
+                {
+                    // Only blank once the app is confirmed gone — blanking a
+                    // screen the app is still drawing to proves nothing.
+                    session.RunCommand(BlankFrameBufferCommand);
+                }
+                else
+                {
+                    LoggingService.LogWarning(
+                        $"The application (pid {pid}) did not stop on the device; it may still be running on its screen.");
+                    onLog?.Invoke($"Warning: the application (pid {pid}) did not stop on the device.");
+                }
             }
             catch (Exception ex)
             {
