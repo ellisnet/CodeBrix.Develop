@@ -61,6 +61,7 @@ public sealed class FrameBufferResolutionInfo
         new FrameBufferResolutionInfo(FrameBufferResolution.SevenInch720x1280, 720, 1280, "7-inch"),
         new FrameBufferResolutionInfo(FrameBufferResolution.SevenInch800x1280, 800, 1280, "7-inch"),
         new FrameBufferResolutionInfo(FrameBufferResolution.EightInch800x1280, 800, 1280, "8-inch"),
+        new FrameBufferResolutionInfo(FrameBufferResolution.EightInch1200x1920, 1200, 1920, "8-inch"),
         new FrameBufferResolutionInfo(FrameBufferResolution.TenInch1200x1920, 1200, 1920, "10-inch"),
         new FrameBufferResolutionInfo(FrameBufferResolution.Hd1080x1920, 1080, 1920, "HD"),
     };

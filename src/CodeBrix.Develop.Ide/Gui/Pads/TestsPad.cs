@@ -203,8 +203,10 @@ public class TestsPad
         toolbar.AddCssClass("toolbar");
         toolbar.Append(ToolButton("run-unit-tests-16", "app.run-all-tests", "Run All Tests (Ctrl+T)"));
         toolbar.Append(ToolButton("execute-16", "app.run-selected-tests", "Run Selected Tests"));
-        toolbar.Append(ToolButton("bug-16", "app.debug-selected-test", "Debug Selected Test"));
+        // Stop sits with the two Run buttons and Debug follows it, matching the
+        // main toolbar's run-then-stop-then-debug order.
         toolbar.Append(ToolButton("stop-16", "app.stop", "Stop (Shift+F5)"));
+        toolbar.Append(ToolButton("bug-16", "app.debug-selected-test", "Debug Selected Test"));
         toolbar.Append(ToolButton("refresh-16", "app.rediscover-tests", "Rediscover Tests"));
         toolbar.Append(filterEntry);
         return toolbar;

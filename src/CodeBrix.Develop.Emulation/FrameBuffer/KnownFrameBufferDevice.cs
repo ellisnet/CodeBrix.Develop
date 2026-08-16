@@ -75,10 +75,12 @@ public sealed class KnownFrameBufferDevice
     //   Asus VivoTab Note 8 (aka M80T) — 8-inch, 800 x 1280,  portrait(?)
     //                                    -> EightInch800x1280 (exists)
     //   NuVision TM800W610L            — 8-inch, 1200 x 1920, portrait(?)
-    //                                    -> needs a NEW EightInch1200x1920: an
-    //                                       8-inch 1200x1920 is a distinct screen
-    //                                       from the existing 10-inch one, since
-    //                                       the size class is the identity.
+    //                                    -> EightInch1200x1920 (exists; added as a
+    //                                       screen distinct from the 10-inch one of
+    //                                       the same dimensions, since the size
+    //                                       class is the identity). At ~283 ppi it
+    //                                       is also the first device expected to
+    //                                       want ScaleUserInterface(Percent150).
 
     /// <summary>
     /// Finds the catalog entry for a reported vendor and model —

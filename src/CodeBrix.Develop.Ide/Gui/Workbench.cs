@@ -315,20 +315,27 @@ public class Workbench
         toolbar.Append(ToolButton("pad-download-16", "app.build", "Build Solution (Ctrl+Shift+B)"));
         toolbar.Append(ToolButton("pad-call-stack-16", "app.rebuild", "Rebuild Solution"));
         toolbar.Append(ToolbarGroupSpace());
-        // Run before Debug, the same order the Tests pad's toolbar uses.
+        // Launching, and ending whatever was launched: the two commands that
+        // have nothing to do with the debugger. Run before Stop, the same order
+        // the Tests pad's toolbar uses.
         toolbar.Append(ToolButton("execute-16", "app.run", "Start Without Debugging (Ctrl+F5)"));
-        toolbar.Append(ToolButton("bug-16", "app.debug", "Start Debugging / Continue (F5)"));
         toolbar.Append(ToolButton("stop-16", "app.stop", "Stop (Shift+F5)"));
         toolbar.Append(ToolbarGroupSpace());
-        // A group of its own: the emulator's two buttons spend most of their life
-        // disabled, because most of the time there is no emulator open to act on.
-        toolbar.Append(ToolButton("undo-16", "app.rotate-emulator",
-            "Rotate Device 90° Counter-Clockwise"));
-        toolbar.Append(ToolButton("close-solution-16", "app.close-emulator", "Close Emulator"));
-        toolbar.Append(ToolbarGroupSpace());
+        // The debugging group. Debug leads it because the button is also
+        // Continue while paused, which is the command the three stepping
+        // buttons hand control back and forth with.
+        toolbar.Append(ToolButton("bug-16", "app.debug", "Start Debugging / Continue (F5)"));
         toolbar.Append(ToolButton("step-over-16", "app.step-over", "Step Over (F10)"));
         toolbar.Append(ToolButton("step-in-16", "app.step-into", "Step Into (F11)"));
         toolbar.Append(ToolButton("step-out-16", "app.step-out", "Step Out (Shift+F11)"));
+        toolbar.Append(ToolbarGroupSpace());
+        // A group of its own: the emulator's two buttons spend most of their life
+        // disabled, because most of the time there is no emulator open to act on.
+        // Not the circular-arrow icon it reads best as: that glyph belongs to
+        // Undo, and Undo/Redo may want the toolbar one day.
+        toolbar.Append(ToolButton("framework-16", "app.rotate-emulator",
+            "Rotate Device 90° Counter-Clockwise"));
+        toolbar.Append(ToolButton("close-solution-16", "app.close-emulator", "Close Emulator"));
         toolbar.Append(ToolbarGroupSpace());
         // Same action as the Tests pad's own button, plus the pane switching a
         // toolbar click deserves: the Tests pad comes to the front here, and
@@ -1508,10 +1515,21 @@ public class Workbench
     {
         frameBufferEmulationRunning = running;
         stopAction?.SetEnabled(running);
-        var canLaunch = !running && IdeApp.CurrentSolution != null;
-        runAction?.SetEnabled(canLaunch);
-        debugAction?.SetEnabled(canLaunch);
+        runAction?.SetEnabled(!running && IdeApp.CurrentSolution != null);
+        UpdateDebugActionEnabled();
     }
+
+    // The Debug action is two commands wearing one button: it STARTS a session
+    // when nothing is running, and CONTINUES a paused one (the F5 convention,
+    // handled at the top of DebugAsync). So "a launch is in flight" is not on
+    // its own a reason to disable it — a PAUSED launch is exactly when Continue
+    // is wanted. Without this the emulator was the one head with no way to
+    // continue, because it is the only launch target that disables Run/Debug
+    // while its application is up; every other head left the action enabled and
+    // got Continue for free.
+    void UpdateDebugActionEnabled() =>
+        debugAction?.SetEnabled(DebugService.IsPaused
+            || (!frameBufferEmulationRunning && IdeApp.CurrentSolution != null));
 
     // The remembered emulator size, seeding the orientation-independent keys from
     // the width/height pair they replaced the first time an older stored size is
@@ -1669,6 +1687,9 @@ public class Workbench
     {
         foreach (var action in new[] { stepOverAction, stepIntoAction, stepOutAction })
             action?.SetEnabled(true);
+        // Continue belongs to the paused state just as much as the stepping
+        // commands do — see UpdateDebugActionEnabled.
+        UpdateDebugActionEnabled();
         callStackPad.ShowFrames(frames);
         ShowBottomTab(callStackPad.Widget);
 
@@ -1688,6 +1709,9 @@ public class Workbench
     {
         foreach (var action in new[] { stepOverAction, stepIntoAction, stepOutAction })
             action?.SetEnabled(false);
+        // No longer paused, so Debug goes back to meaning "start" — which the
+        // emulator refuses while its application is up.
+        UpdateDebugActionEnabled();
         executionDocument?.ClearExecutionLine();
         executionDocument = null;
         callStackPad.Clear();
@@ -1814,17 +1838,15 @@ public class Workbench
         var launched = false;
         try
         {
-            ShowStatus($"Publishing {project.Name} for {rid}…");
-            applicationOutput.AppendLine($"Publishing {project.Name} for {rid}…");
-            var publishResult = await runService.PublishAsync(project.FileName, rid, publishDir, cancellation.Token);
-            if (!publishResult.Success)
-            {
-                ShowStatus("Publish failed — see Application Output");
-                return;
-            }
+            // Both device checks run BEFORE the publish. Neither depends on the
+            // publish output, and either one can stop the launch or interrupt it
+            // with a Paste/Cancel prompt — asked first, the device is dealt with
+            // while nothing has been built yet, instead of after a publish the
+            // user then sits through a second time.
 
             // A read-only device filesystem fails the upload partway through
-            // with an opaque SFTP "Failure"; catch it before copying anything.
+            // with an opaque SFTP "Failure"; catch it before anything is built
+            // or copied.
             if (!await EnsureDeviceFilesystemWritableAsync(device))
             {
                 applicationOutput.AppendLine(
@@ -1834,12 +1856,23 @@ public class Workbench
             }
 
             // The kernel's framebuffer console draws the blinking cursor into
-            // the same screen the app paints; it has to let go first.
+            // the same screen the app paints; it has to let go first. On a
+            // freshly booted device this is the one prompt of the boot, so it
+            // is answered up front rather than after the publish.
             if (!await EnsureFrameBufferConsoleDetachedAsync(device))
             {
                 applicationOutput.AppendLine(
                     "Canceled: the device's text console still owns its screen, so the application would share it with a blinking cursor.");
                 ShowStatus("Run canceled — the device's text console still owns the screen.");
+                return;
+            }
+
+            ShowStatus($"Publishing {project.Name} for {rid}…");
+            applicationOutput.AppendLine($"Publishing {project.Name} for {rid}…");
+            var publishResult = await runService.PublishAsync(project.FileName, rid, publishDir, cancellation.Token);
+            if (!publishResult.Success)
+            {
+                ShowStatus("Publish failed — see Application Output");
                 return;
             }
 
@@ -1968,15 +2001,9 @@ public class Workbench
         var started = false;
         try
         {
-            ShowStatus($"Publishing {project.Name} for {rid}…");
-            applicationOutput.AppendLine($"Publishing {project.Name} for {rid}…");
-            var publishResult = await runService.PublishAsync(project.FileName, rid, publishDir, cancellation.Token);
-            if (!publishResult.Success)
-            {
-                ShowStatus("Publish failed — see Application Output");
-                return;
-            }
-
+            // Same rule as a run: both device checks come before the publish, so
+            // a device that needs a Paste/Cancel answer asks for it while
+            // nothing has been built yet.
             if (!await EnsureDeviceFilesystemWritableAsync(device))
             {
                 applicationOutput.AppendLine(
@@ -1990,6 +2017,15 @@ public class Workbench
                 applicationOutput.AppendLine(
                     "Canceled: the device's text console still owns its screen, so the application would share it with a blinking cursor.");
                 ShowStatus("Debugging canceled — the device's text console still owns the screen.");
+                return;
+            }
+
+            ShowStatus($"Publishing {project.Name} for {rid}…");
+            applicationOutput.AppendLine($"Publishing {project.Name} for {rid}…");
+            var publishResult = await runService.PublishAsync(project.FileName, rid, publishDir, cancellation.Token);
+            if (!publishResult.Success)
+            {
+                ShowStatus("Publish failed — see Application Output");
                 return;
             }
 

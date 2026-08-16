@@ -13,6 +13,7 @@ public class FrameBufferResolutionInfoTests
     [InlineData(FrameBufferResolution.SevenInch720x1280, "720 x 1280 pixels (7-inch)")]
     [InlineData(FrameBufferResolution.SevenInch800x1280, "800 x 1280 pixels (7-inch)")]
     [InlineData(FrameBufferResolution.EightInch800x1280, "800 x 1280 pixels (8-inch)")]
+    [InlineData(FrameBufferResolution.EightInch1200x1920, "1200 x 1920 pixels (8-inch)")]
     [InlineData(FrameBufferResolution.TenInch1200x1920, "1200 x 1920 pixels (10-inch)")]
     [InlineData(FrameBufferResolution.Hd1080x1920, "1080 x 1920 pixels (HD)")]
     public void Portrait_labels_lead_with_the_short_side(FrameBufferResolution resolution, string expected)
@@ -29,6 +30,7 @@ public class FrameBufferResolutionInfoTests
     [InlineData(FrameBufferResolution.SevenInch720x1280, "1280 x 720 pixels (7-inch)")]
     [InlineData(FrameBufferResolution.SevenInch800x1280, "1280 x 800 pixels (7-inch)")]
     [InlineData(FrameBufferResolution.EightInch800x1280, "1280 x 800 pixels (8-inch)")]
+    [InlineData(FrameBufferResolution.EightInch1200x1920, "1920 x 1200 pixels (8-inch)")]
     [InlineData(FrameBufferResolution.TenInch1200x1920, "1920 x 1200 pixels (10-inch)")]
     [InlineData(FrameBufferResolution.Hd1080x1920, "1920 x 1080 pixels (HD)")]
     public void Landscape_labels_lead_with_the_long_side(FrameBufferResolution resolution, string expected)
@@ -74,11 +76,29 @@ public class FrameBufferResolutionInfoTests
         fiveInch.Resolution.Should().NotBe(sevenInch.Resolution);
     }
 
+    [Fact]
+    public void Eight_inch_and_ten_inch_1200x1920_stay_distinct_screens()
+    {
+        //Arrange
+        var eightInch = FrameBufferResolutionInfo.Get(FrameBufferResolution.EightInch1200x1920);
+        var tenInch = FrameBufferResolutionInfo.Get(FrameBufferResolution.TenInch1200x1920);
+
+        //Assert — same pixels, different panels: the 8-inch one (NuVision
+        //TM800W610L) is roughly 283 ppi against the 10-inch one's 226, which is
+        //why they cannot be one screen.
+        eightInch.ShortSide.Should().Be(tenInch.ShortSide);
+        eightInch.LongSide.Should().Be(tenInch.LongSide);
+        eightInch.SizeClass.Should().Be("8-inch");
+        tenInch.SizeClass.Should().Be("10-inch");
+        eightInch.Resolution.Should().NotBe(tenInch.Resolution);
+    }
+
     [Theory]
     [InlineData(FrameBufferResolution.FiveInch720x1280, 360, 640)]
     [InlineData(FrameBufferResolution.SevenInch720x1280, 360, 640)]
     [InlineData(FrameBufferResolution.SevenInch800x1280, 400, 640)]
     [InlineData(FrameBufferResolution.EightInch800x1280, 400, 640)]
+    [InlineData(FrameBufferResolution.EightInch1200x1920, 400, 640)]
     [InlineData(FrameBufferResolution.TenInch1200x1920, 400, 640)]
     [InlineData(FrameBufferResolution.Hd1080x1920, 360, 640)]
     public void Portrait_default_window_size_is_640_tall_and_proportional(
@@ -211,13 +231,22 @@ public class FrameBufferResolutionInfoTests
         }
     }
 
-    [Theory]
-    [InlineData(-1)]
-    [InlineData(6)]
-    public void An_out_of_range_position_falls_back_to_the_default_screen(int index)
+    [Fact]
+    public void A_negative_position_falls_back_to_the_default_screen()
     {
         //Act
-        var screen = FrameBufferResolutionInfo.FromIndex(index);
+        var screen = FrameBufferResolutionInfo.FromIndex(-1);
+
+        //Assert
+        screen.Resolution.Should().Be(FrameBufferResolution.SevenInch720x1280);
+    }
+
+    [Fact]
+    public void A_position_past_the_last_screen_falls_back_to_the_default_screen()
+    {
+        //Act — the first index off the end, taken from the list itself so that
+        //adding a screen cannot quietly turn this case into an in-range one.
+        var screen = FrameBufferResolutionInfo.FromIndex(FrameBufferResolutionInfo.All.Count);
 
         //Assert
         screen.Resolution.Should().Be(FrameBufferResolution.SevenInch720x1280);
