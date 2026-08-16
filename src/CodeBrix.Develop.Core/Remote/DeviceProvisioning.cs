@@ -22,38 +22,19 @@ namespace CodeBrix.Develop.Core.Remote;
 /// permanently: a device whose getty is masked boots to a blank screen with no
 /// way to log in at the keyboard, which reads as a broken device. Detaching
 /// touches nothing on disk, so the device always comes back normal after a
-/// reboot — and <see cref="UnmaskGettyCommand"/> exists to recover devices that
-/// were masked before this was understood.
+/// reboot.
 /// </para>
 /// </summary>
 public static class DeviceProvisioning
 {
-    /// <summary>The console tty whose getty is masked so the app owns the screen.</summary>
-    public const string ConsoleTty = "tty1";
-
     /// <summary>The read-only command listing a user's persistent group names (from /etc/group).</summary>
     public static string PersistentGroupsCommand(string user) => $"id -nG {user}";
 
     /// <summary>The read-only command listing the CURRENT session's effective group names.</summary>
     public const string CurrentSessionGroupsCommand = "id -nG";
 
-    /// <summary>The read-only command reporting the enablement state of the console getty.</summary>
-    public static string GettyEnabledCommand => $"systemctl is-enabled getty@{ConsoleTty}";
-
-    /// <summary>The read-only command reporting whether the console getty is running.</summary>
-    public static string GettyActiveCommand => $"systemctl is-active getty@{ConsoleTty}";
-
     /// <summary>The (sudo) command adding the user to the video and input groups.</summary>
     public static string AddVideoInputGroupsCommand(string user) => $"sudo usermod -aG video,input {user}";
-
-    /// <summary>
-    /// The (sudo) command restoring the on-screen text login: unmasking the
-    /// console getty AND starting it, since masking with <c>--now</c> also
-    /// stopped it and unmasking alone would leave the screen blank until the
-    /// next reboot.
-    /// </summary>
-    public static string UnmaskGettyCommand =>
-        $"sudo systemctl unmask getty@{ConsoleTty} && sudo systemctl start getty@{ConsoleTty}";
 
     /// <summary>
     /// Whether an <c>id -nG</c> listing (space-separated group names) contains
@@ -77,20 +58,6 @@ public static class DeviceProvisioning
     }
 
     /// <summary>
-    /// Whether a <c>systemctl is-enabled</c> result reports the unit as
-    /// <c>masked</c> (masking is the state the console getty ends up in).
-    /// </summary>
-    public static bool IsServiceMasked(string isEnabledOutput) =>
-        string.Equals(isEnabledOutput?.Trim(), "masked", StringComparison.Ordinal);
-
-    /// <summary>
-    /// Whether a <c>systemctl is-active</c> result reports the unit as
-    /// <c>active</c> (a started getty draws the login prompt on the screen).
-    /// </summary>
-    public static bool IsServiceActive(string isActiveOutput) =>
-        string.Equals(isActiveOutput?.Trim(), "active", StringComparison.Ordinal);
-
-    /// <summary>
     /// The read-only command reporting each framebuffer console and whether it
     /// is bound to the screen. The kernel's framebuffer console (fbcon) paints
     /// text — and the blinking cursor — into the very memory the application
@@ -111,11 +78,6 @@ public static class DeviceProvisioning
     public const string DetachFrameBufferConsoleCommand =
         "sudo sh -c 'for d in /sys/class/vtconsole/vtcon*; do " +
         "grep -qi \"frame buffer\" \"$d/name\" && echo 0 > \"$d/bind\"; done'";
-
-    /// <summary>The (sudo) command reattaching the framebuffer console to the screen.</summary>
-    public const string AttachFrameBufferConsoleCommand =
-        "sudo sh -c 'for d in /sys/class/vtconsole/vtcon*; do " +
-        "grep -qi \"frame buffer\" \"$d/name\" && echo 1 > \"$d/bind\"; done'";
 
     /// <summary>
     /// Whether a <see cref="FrameBufferConsoleStateCommand"/> listing reports a
@@ -227,4 +189,25 @@ public static class DeviceProvisioning
     /// <summary>The (sudo) command installing the given packages non-interactively.</summary>
     public static string AptInstallCommand(IEnumerable<string> packages) =>
         $"sudo apt install -y {string.Join(' ', packages)}";
+
+    /// <summary>
+    /// The orientation-sensor daemon package: iio-sensor-proxy publishes the
+    /// accelerometer's orientation on the D-Bus system bus, which is what an
+    /// application declaring UseOrientationSensor follows in production.
+    /// Installed on every FrameBuffer device — it is tiny and harmless on
+    /// hardware without a sensor.
+    /// </summary>
+    public const string OrientationSensorPackage = "iio-sensor-proxy";
+
+    /// <summary>The read-only command reporting whether a Debian package is installed.</summary>
+    public static string PackageInstalledCommand(string package) => $"dpkg -s {package} 2>/dev/null";
+
+    /// <summary>
+    /// Whether a <c>dpkg -s</c> listing reports the package as actually
+    /// installed — dpkg also answers for removed-but-not-purged packages, so
+    /// only the full installed status counts.
+    /// </summary>
+    public static bool IsPackageInstalled(string dpkgOutput) =>
+        !string.IsNullOrEmpty(dpkgOutput)
+        && dpkgOutput.Contains("Status: install ok installed", StringComparison.Ordinal);
 }

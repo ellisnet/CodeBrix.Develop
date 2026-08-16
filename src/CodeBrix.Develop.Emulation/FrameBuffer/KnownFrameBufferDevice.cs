@@ -20,12 +20,14 @@ namespace CodeBrix.Develop.Emulation.FrameBuffer;
 public sealed class KnownFrameBufferDevice
 {
     KnownFrameBufferDevice(string vendor, string model,
-        FrameBufferResolution screen, FrameBufferOrientation nativeOrientation)
+        FrameBufferResolution screen, FrameBufferOrientation nativeOrientation,
+        int touchRotationDegrees = 0)
     {
         Vendor = vendor;
         Model = model;
         Screen = screen;
         NativeOrientation = nativeOrientation;
+        TouchRotationDegrees = touchRotationDegrees;
     }
 
     /// <summary>The DMI sys_vendor value, e.g. "WinBook".</summary>
@@ -43,11 +45,21 @@ public sealed class KnownFrameBufferDevice
     /// </summary>
     public FrameBufferOrientation NativeOrientation { get; }
 
+    /// <summary>
+    /// Degrees the device's touch digitizer is mounted rotated relative to
+    /// its display — 180 for hardware whose touchscreen is glued in
+    /// upside-down and relies on software to correct it (the WinBook TW700;
+    /// the TW802 is mounted normally). A launch on the device passes this to
+    /// the FrameBuffer head so touches land where the finger actually is.
+    /// </summary>
+    public int TouchRotationDegrees { get; }
+
     /// <summary>Every device the IDE knows.</summary>
     public static IReadOnlyList<KnownFrameBufferDevice> All { get; } = new[]
     {
         new KnownFrameBufferDevice("WinBook", "TW700",
-            FrameBufferResolution.SevenInch800x1280, FrameBufferOrientation.Portrait),
+            FrameBufferResolution.SevenInch800x1280, FrameBufferOrientation.Portrait,
+            touchRotationDegrees: 180),
         new KnownFrameBufferDevice("WinBook", "TW802",
             FrameBufferResolution.EightInch800x1280, FrameBufferOrientation.Portrait),
     };

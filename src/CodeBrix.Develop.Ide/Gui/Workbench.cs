@@ -86,20 +86,24 @@ public class Workbench
     // emulator). Null when no such device is active; cleared on disconnect.
     SshTerminalSession? activeFrameBufferDevice;
 
-    // The connected FrameBuffer device, set as soon as the SSH session is up —
-    // BEFORE it is identified or provisioned, unlike activeFrameBufferDevice.
-    // Recovering a device whose login prompt was masked must not require
-    // completing a provisioning run first.
-    SshTerminalSession? connectedFrameBufferDevice;
-
     // The app currently running on the active FrameBuffer device, if any.
     RemoteApplication? runningDeviceApp;
+
+    // Develop's own record of the last orientation it told the device app to
+    // take (the app cannot report back); null until the first send of a run.
+    FrameBufferDeviceOrientation? deviceAppOrientation;
+
+    // True from Run-click until the device launch has happened: a second Run
+    // during publish/deploy would race the first one to the device. Once an
+    // app is RUNNING, a new Run replaces it instead (stops it first).
+    bool deviceLaunchInFlight;
 
     Gio.SimpleAction? buildAction, rebuildAction, cleanAction, runAction, stopAction, closeSolutionAction;
     Gio.SimpleAction? debugAction, stepOverAction, stepIntoAction, stepOutAction;
     Gio.SimpleAction? updateCodeBrixPackagesAction, closeEmulatorAction, rotateEmulatorAction;
-    Gio.SimpleAction? reenableLoginPromptAction;
     Gio.SimpleAction? openSolutionFolderAction, openSolutionTerminalAction;
+    // Tools > Device Orientation — enabled only while an app runs on the device.
+    Gio.SimpleAction?[] deviceOrientationActions = Array.Empty<Gio.SimpleAction?>();
     Gio.SimpleAction? runAllTestsAction, runSelectedTestsAction, debugSelectedTestAction;
     Gio.SimpleAction? runTestAtCaretAction, debugTestAtCaretAction, rediscoverTestsAction;
 
@@ -313,7 +317,7 @@ public class Workbench
         // A group of its own: the emulator's two buttons spend most of their life
         // disabled, because most of the time there is no emulator open to act on.
         toolbar.Append(ToolButton("undo-16", "app.rotate-emulator",
-            "Rotate Emulator 90° Counter-Clockwise"));
+            "Rotate Device 90° Counter-Clockwise"));
         toolbar.Append(ToolButton("close-solution-16", "app.close-emulator", "Close Emulator"));
         toolbar.Append(ToolbarGroupSpace());
         toolbar.Append(ToolButton("step-over-16", "app.step-over", "Step Over (F10)"));
@@ -417,8 +421,17 @@ public class Workbench
         // Solution-independent: a device connection is about the machine on
         // the desk, not about what is loaded in the IDE.
         AddAction("ssh-to-device", ShowSshToDeviceDialog);
-        reenableLoginPromptAction = AddAction(
-            "reenable-login-prompt", () => _ = ReenableLoginPromptAsync(), null, enabled: false);
+        // Device Orientation: tells the app running on the FrameBuffer device
+        // to render in the chosen orientation (the head listens for it because
+        // device runs always launch with ORIENTATION_SOURCE=develop). The app
+        // still gates it with its own AutoRotationEnabled configuration.
+        deviceOrientationActions = new[]
+        {
+            AddAction("device-orientation-landscape", () => _ = SendDeviceOrientationAsync("Landscape"), null, enabled: false),
+            AddAction("device-orientation-portrait", () => _ = SendDeviceOrientationAsync("Portrait"), null, enabled: false),
+            AddAction("device-orientation-landscape-flipped", () => _ = SendDeviceOrientationAsync("LandscapeFlipped"), null, enabled: false),
+            AddAction("device-orientation-portrait-flipped", () => _ = SendDeviceOrientationAsync("PortraitFlipped"), null, enabled: false),
+        };
         AddAction("about", ShowAbout);
 
         // The MonoDevelop convention: Ctrl+T runs every test in the solution.
@@ -499,9 +512,14 @@ public class Workbench
         toolsMenu.Append("Open Solution _Folder", "app.open-solution-folder");
         toolsMenu.Append("Open Solution _Terminal", "app.open-solution-terminal");
         toolsMenu.Append("SSH to _Device…", "app.ssh-to-device");
-        toolsMenu.Append("Re-enable _Login Prompt", "app.reenable-login-prompt");
         toolsMenu.Append("_Update CodeBrix Package References", "app.update-codebrix-packages");
         toolsMenu.Append("Close _Emulator", "app.close-emulator");
+        var deviceOrientationMenu = Gio.Menu.New();
+        deviceOrientationMenu.Append("_Landscape", "app.device-orientation-landscape");
+        deviceOrientationMenu.Append("_Portrait", "app.device-orientation-portrait");
+        deviceOrientationMenu.Append("Landscape _Flipped", "app.device-orientation-landscape-flipped");
+        deviceOrientationMenu.Append("Portrait Flippe_d", "app.device-orientation-portrait-flipped");
+        toolsMenu.AppendSubmenu("Device _Orientation", deviceOrientationMenu);
 
         var helpMenu = Gio.Menu.New();
         helpMenu.Append("_About CodeBrix Develop", "app.about");
@@ -1463,7 +1481,8 @@ public class Workbench
         SaveFrameBufferEmulatorSize();
         frameBufferEmulator = null;
         closeEmulatorAction?.SetEnabled(false);
-        rotateEmulatorAction?.SetEnabled(false);
+        // Rotate stays available if it still has a device app to turn.
+        rotateEmulatorAction?.SetEnabled(runningDeviceApp is not null);
         // Closing the emulator with an app running terminates the app — the
         // user unplugged the device.
         if (frameBufferEmulationRunning)
@@ -1535,12 +1554,31 @@ public class Workbench
         IdePreferences.FrameBufferWindowShortSide.Value = shortSide;
     }
 
-    // Turns the emulated device a quarter turn counter-clockwise. Available
-    // whenever the window is open, running or not: a device can be set down the
-    // way you want it before it is switched on, and the orientation is handed to
-    // the application when one starts.
+    // Turns the emulated device — or, while an app runs on a real FrameBuffer
+    // device, THAT device — a quarter turn counter-clockwise. For the emulator
+    // this is available whenever the window is open, running or not: a device
+    // can be set down the way you want it before it is switched on, and the
+    // orientation is handed to the application when one starts. For a real
+    // device the instruction is broadcast to the running app, which honors it
+    // only within its own AutoRotationEnabled rules — a refusal is silent,
+    // exactly as a physically turned device would be silently ignored.
     void RotateFrameBufferEmulator()
     {
+        if (runningDeviceApp is not null && activeFrameBufferDevice is not null
+            && IdePreferences.SshDeviceEnableOrientation.Value)
+        {
+            // Develop tracks the cycle itself, since the app cannot report
+            // back. It starts from the device's resting (native) orientation,
+            // mirroring the emulator window's convention.
+            var previous = deviceAppOrientation
+                ?? (Enum.TryParse<FrameBufferDeviceOrientation>(
+                        IdePreferences.SshDeviceScreenOrientation.Value, out var resting)
+                    ? resting
+                    : FrameBufferDeviceOrientation.Landscape);
+            var next = (FrameBufferDeviceOrientation)(((int)previous + 1) % 4);
+            _ = SendDeviceOrientationAsync(next.ToString());
+            return;
+        }
         if (frameBufferEmulator is not { } emulator)
             return;
         emulator.RotateCounterClockwise();
@@ -1719,22 +1757,32 @@ public class Workbench
             return;
         }
 
+        if (deviceLaunchInFlight)
+        {
+            ShowStatus("A run to the device is already in progress.");
+            return;
+        }
+        deviceLaunchInFlight = true;
+
         documentManager.SaveAll();
         applicationOutput.Clear();
         ShowBottomTab(applicationOutput.Widget);
         stopAction?.SetEnabled(true);
-        runCancellation = new CancellationTokenSource();
+        var cancellation = new CancellationTokenSource();
+        runCancellation = cancellation;
 
         var appName = project.Name;
         var entryDll = $"{project.Name}.dll";
         var remoteDir = DeviceLaunch.RemoteAppDirectory(appName);
         var publishDir = Path.Combine(Path.GetTempPath(), "CodeBrix.Develop", "publish", appName);
 
+        RemoteApplication? app = null;
+        var launched = false;
         try
         {
             ShowStatus($"Publishing {project.Name} for {rid}…");
             applicationOutput.AppendLine($"Publishing {project.Name} for {rid}…");
-            var publishResult = await runService.PublishAsync(project.FileName, rid, publishDir, runCancellation.Token);
+            var publishResult = await runService.PublishAsync(project.FileName, rid, publishDir, cancellation.Token);
             if (!publishResult.Success)
             {
                 ShowStatus("Publish failed — see Application Output");
@@ -1761,6 +1809,21 @@ public class Workbench
                 return;
             }
 
+            // A second instance sharing the framebuffer is never meaningful —
+            // both blit the screen and both receive every touch — and the head
+            // itself now refuses to start one. Run replaces run: stop the
+            // previous instance before its files are overwritten by the deploy.
+            if (runningDeviceApp is { } previous)
+            {
+                applicationOutput.AppendLine("Stopping the previous instance on the device…");
+                runningDeviceApp = null;
+                await Task.Run(() =>
+                {
+                    previous.Stop();
+                    previous.Dispose();
+                });
+            }
+
             ShowStatus($"Deploying to {device.DisplayName}…");
             var uploaded = await Task.Run(() =>
             {
@@ -1774,10 +1837,23 @@ public class Workbench
 
             ShowStatus($"Running {project.Name} on {device.DisplayName}…");
             var exited = new TaskCompletionSource<int?>(TaskCreationOptions.RunContinuationsAsynchronously);
-            var app = DeviceLaunch.Run(device, remoteDir, entryDll,
-                line => uiContext.Post(_ => applicationOutput.AppendLine(line), null));
+            app = DeviceLaunch.Run(device, remoteDir, entryDll,
+                line => uiContext.Post(_ => applicationOutput.AppendLine(line), null),
+                IdePreferences.SshDeviceTouchRotation.Value,
+                IdePreferences.SshDeviceEnableOrientation.Value);
             app.Exited += code => uiContext.Post(_ => exited.TrySetResult(code), null);
             runningDeviceApp = app;
+            launched = true;
+            deviceLaunchInFlight = false;
+            // A fresh launch is back in the app's own start orientation, so the
+            // rotate cycle restarts from the device's resting orientation. The
+            // orientation controls exist only when the connect dialog enabled
+            // orientation changes for this device.
+            deviceAppOrientation = null;
+            var orientationEnabled = IdePreferences.SshDeviceEnableOrientation.Value;
+            SetDeviceOrientationActionsEnabled(orientationEnabled);
+            if (orientationEnabled)
+                rotateEmulatorAction?.SetEnabled(true);
 
             var exitCode = await exited.Task;
             applicationOutput.AppendLine($"The application exited on the device (code {exitCode?.ToString() ?? "unknown"}).");
@@ -1790,11 +1866,27 @@ public class Workbench
         }
         finally
         {
-            runningDeviceApp?.Dispose();
-            runningDeviceApp = null;
-            runCancellation?.Dispose();
-            runCancellation = null;
-            DisableStopUnlessEmulating();
+            // Release only what THIS run still owns: with run-replaces-run a
+            // NEWER run may already have taken the slots, and this (older)
+            // continuation finishing must not dispose the newer app's handle
+            // or cancellation, nor disable the Stop button out from under it.
+            // A run that launched already released the in-flight claim — by
+            // now the flag may be a newer run's, so it is left alone.
+            if (!launched)
+                deviceLaunchInFlight = false;
+            app?.Dispose();
+            if (ReferenceEquals(runningDeviceApp, app))
+            {
+                runningDeviceApp = null;
+                SetDeviceOrientationActionsEnabled(false);
+                rotateEmulatorAction?.SetEnabled(frameBufferEmulator is not null);
+            }
+            cancellation.Dispose();
+            if (ReferenceEquals(runCancellation, cancellation))
+            {
+                runCancellation = null;
+                DisableStopUnlessEmulating();
+            }
         }
     }
 
@@ -1941,19 +2033,11 @@ public class Workbench
             // A fresh connection replaces any prior device; the new one only
             // becomes the Run/Debug target once it reaches "ready".
             activeFrameBufferDevice = null;
-            connectedFrameBufferDevice = null;
-            reenableLoginPromptAction?.SetEnabled(false);
             terminalPad.AttachSession(session);
             ShowBottomTab(terminalPad.Widget);
             ShowStatus($"SSH connected to {session.DisplayName}");
             if (IdePreferences.SshDeviceUseAsFrameBuffer.Value)
-            {
-                connectedFrameBufferDevice = session;
-                // Independent of identification/provisioning: a device masked
-                // in an earlier session can be recovered the moment it connects.
-                _ = RefreshLoginPromptActionAsync(session);
                 _ = IdentifyFrameBufferDeviceAsync(session);
-            }
         };
         dialog.Present();
     }
@@ -2003,6 +2087,7 @@ public class Workbench
             {
                 IdePreferences.SshDeviceScreen.Value = known.Screen.ToString();
                 IdePreferences.SshDeviceScreenOrientation.Value = known.NativeOrientation.ToString();
+                IdePreferences.SshDeviceTouchRotation.Value = known.TouchRotationDegrees;
                 var screen = FrameBufferResolutionInfo.Get(known.Screen);
                 ShowStatus($"Identified FrameBuffer device: {identity.Vendor} {identity.Model} " +
                     $"({screen.ShortSide} x {screen.LongSide})");
@@ -2011,6 +2096,7 @@ public class Workbench
             {
                 IdePreferences.SshDeviceScreen.Value = "";
                 IdePreferences.SshDeviceScreenOrientation.Value = "";
+                IdePreferences.SshDeviceTouchRotation.Value = 0;
                 ShowStatus("Unknown FrameBuffer device.");
             }
 
@@ -2071,8 +2157,8 @@ public class Workbench
     void OnFrameBufferDeviceDisconnected()
     {
         activeFrameBufferDevice = null;
-        connectedFrameBufferDevice = null;
-        reenableLoginPromptAction?.SetEnabled(false);
+        SetDeviceOrientationActionsEnabled(false);
+        rotateEmulatorAction?.SetEnabled(frameBufferEmulator is not null);
         if (runningDeviceApp is { } app)
         {
             runningDeviceApp = null;
@@ -2137,6 +2223,28 @@ public class Workbench
                     return;
             }
 
+            // 3. The orientation-sensor daemon, so an application declaring
+            //    UseOrientationSensor can be production-tested on a
+            //    sensor-equipped device. Only when the connect dialog enabled
+            //    orientation changes — a developer whose device or app never
+            //    rotates is not walked through installing a sensor daemon.
+            if (IdePreferences.SshDeviceEnableOrientation.Value)
+            {
+                var sensorPackage = await RunOnDeviceAsync(session,
+                    DeviceProvisioning.PackageInstalledCommand(DeviceProvisioning.OrientationSensorPackage));
+                if (!DeviceProvisioning.IsPackageInstalled(sensorPackage))
+                {
+                    if (!await PasteProvisioningCommandAsync(session,
+                            "The device is missing iio-sensor-proxy, which reports the accelerometer's orientation to applications that follow the orientation sensor.",
+                            DeviceProvisioning.AptInstallCommand(new[] { DeviceProvisioning.OrientationSensorPackage })))
+                        return;
+                    if (!await PollUntilAsync(session, () => DeviceProvisioning.IsPackageInstalled(
+                            session.RunCommand(DeviceProvisioning.PackageInstalledCommand(
+                                DeviceProvisioning.OrientationSensorPackage)).Output)))
+                        return;
+                }
+            }
+
             // The group change only reaches a NEW session; if this one already
             // has the groups (nothing but getty was done), it is ready now —
             // otherwise the user must reconnect for usermod to take effect.
@@ -2199,74 +2307,36 @@ public class Workbench
             device.RunCommand(DeviceProvisioning.FrameBufferConsoleStateCommand).Output));
     }
 
-    // Tools > Re-enable Login Prompt: puts a device back the way it was found.
-    // Offered whenever a connected FrameBuffer device reports a masked getty —
-    // not only after a provisioning run — because the devices that need it most
-    // are the ones masked in an earlier session, which would otherwise have no
-    // way back short of reinstalling the OS. Restores the console too, when a
-    // run detached it, so the login prompt is actually visible afterwards.
-    async Task ReenableLoginPromptAsync()
+    void SetDeviceOrientationActionsEnabled(bool enabled)
     {
-        if (connectedFrameBufferDevice is not { } device)
+        foreach (var action in deviceOrientationActions)
+            action?.SetEnabled(enabled);
+    }
+
+    // Tools > Device Orientation: broadcasts the instruction on the device's
+    // D-Bus system bus, where the running app is listening (device runs always
+    // launch with CODEBRIX_FRAMEBUFFER_ORIENTATION_SOURCE=develop). The app
+    // applies it through the same gate as any rotation source, so one that
+    // locked its orientation refuses it — that refusal is silent here, exactly
+    // as a physically turned device would be silently ignored.
+    async Task SendDeviceOrientationAsync(string orientation)
+    {
+        if (activeFrameBufferDevice is not { } device || runningDeviceApp is null
+            || !IdePreferences.SshDeviceEnableOrientation.Value)
             return;
         try
         {
-            var gettyState = await RunOnDeviceAsync(device, DeviceProvisioning.GettyEnabledCommand);
-            if (DeviceProvisioning.IsServiceMasked(gettyState))
-            {
-                if (!await PasteProvisioningCommandAsync(device,
-                        "The device's on-screen text login is masked, so the device shows nothing at boot and cannot be logged into with its own keyboard.",
-                        DeviceProvisioning.UnmaskGettyCommand))
-                    return;
-                if (!await PollUntilAsync(device, () =>
-                        !DeviceProvisioning.IsServiceMasked(
-                            device.RunCommand(DeviceProvisioning.GettyEnabledCommand).Output)
-                        && DeviceProvisioning.IsServiceActive(
-                            device.RunCommand(DeviceProvisioning.GettyActiveCommand).Output)))
-                    return;
-            }
-
-            // A detached console would leave the restored login invisible.
-            var consoleState = await RunOnDeviceAsync(device, DeviceProvisioning.FrameBufferConsoleStateCommand);
-            if (!DeviceProvisioning.IsFrameBufferConsoleAttached(consoleState))
-            {
-                if (!await PasteProvisioningCommandAsync(device,
-                        "The device's text console is detached from its screen, so the login prompt would still not be visible.",
-                        DeviceProvisioning.AttachFrameBufferConsoleCommand))
-                    return;
-                if (!await PollUntilAsync(device, () => DeviceProvisioning.IsFrameBufferConsoleAttached(
-                        device.RunCommand(DeviceProvisioning.FrameBufferConsoleStateCommand).Output)))
-                    return;
-            }
-
-            await RefreshLoginPromptActionAsync(device);
-            ShowStatus($"The login prompt is back on {device.DisplayName}'s screen.");
+            // Remember what was sent so the toolbar's Rotate continues the
+            // counter-clockwise cycle from here, however this send was chosen.
+            if (Enum.TryParse<FrameBufferDeviceOrientation>(orientation, out var sent))
+                deviceAppOrientation = sent;
+            await Task.Run(() => device.RunCommand(DeviceLaunch.SendOrientationCommand(orientation)));
+            ShowStatus($"Told the device app to render {orientation}.");
         }
         catch (Exception ex)
         {
-            LoggingService.LogError("Re-enabling the device login prompt failed", ex);
-            ShowStatus("Re-enabling the login prompt failed — see the IDE Log.");
-        }
-    }
-
-    // Enables Tools > Re-enable Login Prompt only while it has something to do:
-    // a connected FrameBuffer device whose on-screen login is masked.
-    async Task RefreshLoginPromptActionAsync(SshTerminalSession device)
-    {
-        try
-        {
-            var gettyState = await RunOnDeviceAsync(device, DeviceProvisioning.GettyEnabledCommand);
-            var masked = DeviceProvisioning.IsServiceMasked(gettyState);
-            reenableLoginPromptAction?.SetEnabled(masked && connectedFrameBufferDevice == device);
-            if (masked)
-            {
-                LoggingService.LogInfo(
-                    $"The on-screen login on {device.DisplayName} is masked; Tools > Re-enable Login Prompt will restore it.");
-            }
-        }
-        catch (Exception ex)
-        {
-            LoggingService.LogInfo($"Could not read the device's login-prompt state: {ex.Message}");
+            LoggingService.LogError("Sending the device orientation failed", ex);
+            ShowStatus("Sending the device orientation failed — see the IDE Log.");
         }
     }
 
@@ -2441,11 +2511,12 @@ public class Workbench
     // Installs the .NET 10 runtime on the device with Microsoft's
     // dotnet-install.sh, entirely inside the user's home (no root): the
     // script lands in ~/.cache/codebrix-develop and the runtime in ~/.dotnet
-    // — the same path the probe already checks. Two unprivileged
-    // prerequisites are gated first, because the script cannot supply them
-    // itself: a downloader (it uses curl or wget for the runtime tarball) and
-    // the ICU library (a non-optional native dependency). A missing one is
-    // the user's to install; we say which and stop.
+    // — the same path the probe already checks. Two prerequisites are gated
+    // first, because the script cannot supply them itself: a downloader (it
+    // uses curl or wget for the runtime tarball) and the ICU library (a
+    // non-optional native dependency). A missing downloader is the user's to
+    // install — we say which and stop; a missing ICU goes through the same
+    // Paste/poll prompt as the provisioning walk, then the install continues.
     async Task<(bool Ready, string? ProbeOutput)> InstallDotnetRuntimeAsync(SshTerminalSession session)
     {
         const string scriptDir = "$HOME/.cache/codebrix-develop";
@@ -2472,14 +2543,20 @@ public class Workbench
             // The ICU check, unprivileged: ldconfig -p prints the loader's
             // cache, so a hit means the runtime will resolve libicu. ldconfig
             // lives in /sbin, off a non-login shell's PATH — call it by path.
-            var (icuExit, icuOutput) = await Task.Run(() =>
-                session.RunCommand("/sbin/ldconfig -p 2>/dev/null | grep -i libicu"));
-            if (icuExit != 0 || string.IsNullOrWhiteSpace(icuOutput))
+            bool IcuInstalled()
             {
-                await ShowInstallBlockedAsync(
-                    ".NET needs the ICU library, which isn't installed.",
-                    "Run `sudo apt install libicu-dev` on the device, then try again.");
-                return (false, null);
+                var (icuExit, icuOutput) = session.RunCommand(
+                    "/sbin/ldconfig -p 2>/dev/null | grep -i libicu");
+                return icuExit == 0 && !string.IsNullOrWhiteSpace(icuOutput);
+            }
+            if (!await Task.Run(IcuInstalled))
+            {
+                if (!await PasteProvisioningCommandAsync(session,
+                        ".NET needs the ICU library, which isn't installed.",
+                        DeviceProvisioning.AptInstallCommand(new[] { "libicu-dev" })))
+                    return (false, null);
+                if (!await PollUntilAsync(session, IcuInstalled))
+                    return (false, null);
             }
 
             // Fetch the script into a home scratch dir. The whole chain's

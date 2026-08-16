@@ -117,11 +117,26 @@ public static class DeviceLaunch
     /// Launches the deployed app on the device's framebuffer and returns a
     /// handle streaming its output. Forces the software /dev/fb0 renderer
     /// (DRM master is never available over SSH) and runs dotnet by full path
-    /// (~/.dotnet is off the non-login PATH).
+    /// (~/.dotnet is off the non-login PATH). A nonzero
+    /// <paramref name="touchRotationDegrees"/> (180 for a device whose touch
+    /// digitizer is mounted upside-down, like the WinBook TW700) is passed to
+    /// the head so it corrects touch positions.
+    /// <paramref name="orientationEnabled"/> reflects the connect dialog's
+    /// "Enable Orientation Changes": true lets the app listen for the IDE's
+    /// orientation instructions, false disables the app's orientation sources
+    /// entirely — either way the device's own accelerometer is ignored during
+    /// testing, even for apps that declared UseOrientationSensor.
     /// </summary>
     public static RemoteApplication Run(
-        SshTerminalSession session, string remoteAppDir, string entryDll, Action<string> onLog)
+        SshTerminalSession session, string remoteAppDir, string entryDll, Action<string> onLog,
+        int touchRotationDegrees = 0, bool orientationEnabled = false)
     {
+        var orientationSource = orientationEnabled ? "develop" : "none";
+        var environment = "DOTNET_ROOT=\"$HOME/.dotnet\" CODEBRIX_FRAMEBUFFER_USE_DRM=0"
+            + $" CODEBRIX_FRAMEBUFFER_ORIENTATION_SOURCE={orientationSource}";
+        if (touchRotationDegrees != 0)
+            environment += $" CODEBRIX_FRAMEBUFFER_TOUCH_ROTATION={touchRotationDegrees}";
+
         // Launch in the background, print the PID on a marker line so stop can
         // kill it precisely, then wait so the channel stays open for the app's
         // lifetime.
@@ -134,14 +149,29 @@ public static class DeviceLaunch
         // and the exit code reported is the app's own.
         var command = string.Join(" ",
             $"( cd \"$HOME/{remoteAppDir}\" &&",
-            "exec env DOTNET_ROOT=\"$HOME/.dotnet\"",
-            "CODEBRIX_FRAMEBUFFER_USE_DRM=0",
+            $"exec env {environment}",
             $"\"$HOME/.dotnet/dotnet\" \"{entryDll}\" ) &",
             "__cbpid=$!;",
             $"echo \"{RemoteApplication.PidMarker} $__cbpid\";",
             "wait $__cbpid");
         return new RemoteApplication(session, command, onLog);
     }
+
+    /// <summary>
+    /// The command broadcasting a device-orientation instruction on the
+    /// device's D-Bus system bus. The head listens for exactly this signal
+    /// when launched with CODEBRIX_FRAMEBUFFER_ORIENTATION_SOURCE=develop
+    /// (which <see cref="Run"/> always sets) and applies it through the same
+    /// gate as any rotation source, so an app that locked its orientation
+    /// refuses it. Broadcast signals need no bus policy or name ownership —
+    /// nothing is provisioned — and dbus-send ships with the dbus package
+    /// systemd-logind already requires.
+    /// </summary>
+    /// <param name="orientation">A DisplayOrientations member name: Landscape,
+    /// Portrait, LandscapeFlipped or PortraitFlipped.</param>
+    public static string SendOrientationCommand(string orientation) =>
+        "dbus-send --system --type=signal /com/codebrix/platform/FrameBuffer " +
+        $"com.codebrix.platform.FrameBuffer.DeviceOrientation string:{orientation}";
 }
 
 /// <summary>

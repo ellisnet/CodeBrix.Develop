@@ -27,20 +27,6 @@ public class DeviceProvisioningTests
         => DeviceProvisioning.HasVideoAndInputGroups("debian videofoo inputbar").Should().BeFalse();
 
     [Fact]
-    public void IsServiceMasked_is_true_for_masked()
-        => DeviceProvisioning.IsServiceMasked("masked\n").Should().BeTrue();
-
-    [Theory]
-    [InlineData("enabled")]
-    [InlineData("disabled")]
-    [InlineData("static")]
-    [InlineData("generated")]
-    [InlineData("")]
-    [InlineData(null)]
-    public void IsServiceMasked_is_false_for_anything_else(string state)
-        => DeviceProvisioning.IsServiceMasked(state).Should().BeFalse();
-
-    [Fact]
     public void MissingNativeDependencies_finds_the_ones_absent_from_the_loader_cache()
     {
         //Arrange — a cache with fontconfig + icu present, libinput + xkbcommon absent
@@ -116,32 +102,12 @@ public class DeviceProvisioningTests
     }
 
     [Fact]
-    public void IsServiceActive_reads_the_systemctl_is_active_result()
-    {
-        DeviceProvisioning.IsServiceActive("active").Should().BeTrue();
-        DeviceProvisioning.IsServiceActive("active\n").Should().BeTrue();
-        DeviceProvisioning.IsServiceActive("inactive").Should().BeFalse();
-        DeviceProvisioning.IsServiceActive("").Should().BeFalse();
-        DeviceProvisioning.IsServiceActive(null).Should().BeFalse();
-    }
-
-    [Fact]
-    public void Unmasking_the_login_also_starts_it()
-    {
-        //Arrange & Act & Assert — masking used --now, which stopped the unit,
-        //so unmasking alone would leave the screen blank until a reboot.
-        DeviceProvisioning.UnmaskGettyCommand
-            .Should().Be("sudo systemctl unmask getty@tty1 && sudo systemctl start getty@tty1");
-    }
-
-    [Fact]
     public void The_console_commands_match_the_framebuffer_console_by_name()
     {
         //Arrange & Act & Assert — the vtcon index varies by device, so every
         //console command selects on the name and writes only the bind flag.
         DeviceProvisioning.FrameBufferConsoleStateCommand.Should().Contain("frame buffer");
         DeviceProvisioning.DetachFrameBufferConsoleCommand.Should().Contain("echo 0 > \"$d/bind\"");
-        DeviceProvisioning.AttachFrameBufferConsoleCommand.Should().Contain("echo 1 > \"$d/bind\"");
         //Nothing on disk changes: a reboot alone restores the console.
         DeviceProvisioning.DetachFrameBufferConsoleCommand.Should().NotContain("grub");
     }
@@ -213,12 +179,34 @@ public class DeviceProvisioningTests
     }
 
     [Fact]
-    public void Command_builders_use_the_given_user_and_the_console_tty()
+    public void Command_builders_use_the_given_user()
     {
         DeviceProvisioning.AddVideoInputGroupsCommand("debian")
             .Should().Be("sudo usermod -aG video,input debian");
         DeviceProvisioning.PersistentGroupsCommand("debian").Should().Be("id -nG debian");
-        DeviceProvisioning.GettyEnabledCommand.Should().Be("systemctl is-enabled getty@tty1");
-        DeviceProvisioning.GettyActiveCommand.Should().Be("systemctl is-active getty@tty1");
+    }
+
+    [Fact]
+    public void IsPackageInstalled_requires_the_full_installed_status()
+    {
+        //Arrange & Act & Assert — dpkg -s also answers for removed-but-not-purged
+        //packages ("deinstall ok config-files"); only fully installed counts.
+        DeviceProvisioning.IsPackageInstalled(
+                "Package: iio-sensor-proxy\nStatus: install ok installed\nPriority: optional")
+            .Should().BeTrue();
+        DeviceProvisioning.IsPackageInstalled(
+                "Package: iio-sensor-proxy\nStatus: deinstall ok config-files")
+            .Should().BeFalse();
+        DeviceProvisioning.IsPackageInstalled("").Should().BeFalse();
+        DeviceProvisioning.IsPackageInstalled(null).Should().BeFalse();
+    }
+
+    [Fact]
+    public void The_orientation_sensor_step_checks_and_installs_iio_sensor_proxy()
+    {
+        DeviceProvisioning.PackageInstalledCommand(DeviceProvisioning.OrientationSensorPackage)
+            .Should().Be("dpkg -s iio-sensor-proxy 2>/dev/null");
+        DeviceProvisioning.AptInstallCommand(new[] { DeviceProvisioning.OrientationSensorPackage })
+            .Should().Be("sudo apt install -y iio-sensor-proxy");
     }
 }

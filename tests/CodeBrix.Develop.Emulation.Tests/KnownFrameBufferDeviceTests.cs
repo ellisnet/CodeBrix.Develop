@@ -16,6 +16,8 @@ public class KnownFrameBufferDeviceTests
         device.Should().NotBeNull();
         device.Screen.Should().Be(FrameBufferResolution.SevenInch800x1280);
         device.NativeOrientation.Should().Be(FrameBufferOrientation.Portrait);
+        // Its touch digitizer is mounted upside-down; the head must correct it.
+        device.TouchRotationDegrees.Should().Be(180);
     }
 
     [Fact]
@@ -28,6 +30,8 @@ public class KnownFrameBufferDeviceTests
         device.Should().NotBeNull();
         device.Screen.Should().Be(FrameBufferResolution.EightInch800x1280);
         device.NativeOrientation.Should().Be(FrameBufferOrientation.Portrait);
+        // Unlike the TW700, its touch digitizer is mounted normally.
+        device.TouchRotationDegrees.Should().Be(0);
     }
 
     [Fact]

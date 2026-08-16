@@ -178,6 +178,19 @@ public static class IdePreferences
         ConfigurationProperty.Create("CodeBrix.Develop.Ide.SshDevice.EnableDebugging", false);
 
     /// <summary>
+    /// Whether orientation changes are enabled for the FrameBuffer device.
+    /// On: the provisioning walk offers the iio-sensor-proxy install, and the
+    /// IDE's rotate button / Tools > Device Orientation menu send orientation
+    /// instructions to the running app. Off (the default): nothing
+    /// orientation-related is provisioned or sent, and a device launch
+    /// disables the app's orientation sources entirely — for the developer
+    /// whose device or app never rotates. Only meaningful with
+    /// <see cref="SshDeviceUseAsFrameBuffer"/>.
+    /// </summary>
+    public static readonly ConfigurationProperty<bool> SshDeviceEnableOrientation =
+        ConfigurationProperty.Create("CodeBrix.Develop.Ide.SshDevice.EnableOrientation", false);
+
+    /// <summary>
     /// The DMI hardware vendor the most recently identified SSH device
     /// reported (e.g. "WinBook"), "unknown" when it could not be captured,
     /// or "" before any device was ever identified. Describes ACTUAL
@@ -256,6 +269,16 @@ public static class IdePreferences
     /// </summary>
     public static readonly ConfigurationProperty<string> SshDeviceScreenOrientation =
         ConfigurationProperty.Create("CodeBrix.Develop.Ide.SshDevice.ScreenOrientation", "");
+
+    /// <summary>
+    /// Degrees the identified device's touch digitizer is mounted rotated
+    /// relative to its display, from the known-device catalog (180 for the
+    /// WinBook TW700, whose touchscreen is glued in upside-down); 0 for a
+    /// normally-mounted or unknown device. Passed to the FrameBuffer head at
+    /// launch so touches land where the finger actually is.
+    /// </summary>
+    public static readonly ConfigurationProperty<int> SshDeviceTouchRotation =
+        ConfigurationProperty.Create("CodeBrix.Develop.Ide.SshDevice.TouchRotation", 0);
 
     /// <summary>
     /// The remembered LONGER side of the frame-buffer emulator's screen area (the

@@ -31,6 +31,7 @@ public class SshToDeviceDialog
     readonly Gtk.PasswordEntry passwordEntry;
     readonly Gtk.CheckButton frameBufferCheck;
     readonly Gtk.CheckButton debuggingCheck;
+    readonly Gtk.CheckButton orientationCheck;
     readonly Gtk.Label hostErrorLabel;
     readonly Gtk.Label errorLabel;
     readonly Gtk.Label progressLabel;
@@ -93,19 +94,27 @@ public class SshToDeviceDialog
         frameBufferCheck = Gtk.CheckButton.NewWithLabel("Use as FrameBuffer Device");
         frameBufferCheck.SetActive(IdePreferences.SshDeviceUseAsFrameBuffer.Value);
 
-        // "Enable for SSH Debugging" sits under, and depends on, the FrameBuffer
-        // choice: only selectable while that box is checked, and forced off when
-        // it is not.
+        // "Enable for SSH Debugging" and "Enable Orientation Changes" sit under,
+        // and depend on, the FrameBuffer choice: only selectable while that box
+        // is checked, and forced off when it is not.
         debuggingCheck = Gtk.CheckButton.NewWithLabel("Enable for SSH Debugging");
         debuggingCheck.SetMarginStart(24);
         debuggingCheck.SetSensitive(frameBufferCheck.GetActive());
         debuggingCheck.SetActive(frameBufferCheck.GetActive() && IdePreferences.SshDeviceEnableDebugging.Value);
+        orientationCheck = Gtk.CheckButton.NewWithLabel("Enable Orientation Changes");
+        orientationCheck.SetMarginStart(24);
+        orientationCheck.SetSensitive(frameBufferCheck.GetActive());
+        orientationCheck.SetActive(frameBufferCheck.GetActive() && IdePreferences.SshDeviceEnableOrientation.Value);
         frameBufferCheck.OnToggled += (_, _) =>
         {
             var on = frameBufferCheck.GetActive();
             debuggingCheck.SetSensitive(on);
+            orientationCheck.SetSensitive(on);
             if (!on)
+            {
                 debuggingCheck.SetActive(false);
+                orientationCheck.SetActive(false);
+            }
         };
 
         errorLabel = Gtk.Label.New(null);
@@ -142,6 +151,7 @@ public class SshToDeviceDialog
         content.Append(passwordEntry);
         content.Append(frameBufferCheck);
         content.Append(debuggingCheck);
+        content.Append(orientationCheck);
         content.Append(errorLabel);
         content.Append(progressLabel);
         content.Append(buttonRow);
@@ -202,6 +212,8 @@ public class SshToDeviceDialog
         // Debugging depends on FrameBuffer; never store it on without its parent.
         IdePreferences.SshDeviceEnableDebugging.Value =
             frameBufferCheck.GetActive() && debuggingCheck.GetActive();
+        IdePreferences.SshDeviceEnableOrientation.Value =
+            frameBufferCheck.GetActive() && orientationCheck.GetActive();
 
         connecting = true;
         SetBusy(true);
@@ -236,6 +248,7 @@ public class SshToDeviceDialog
         frameBufferCheck.SetSensitive(!busy);
         // Only re-enable debugging if its parent is checked.
         debuggingCheck.SetSensitive(!busy && frameBufferCheck.GetActive());
+        orientationCheck.SetSensitive(!busy && frameBufferCheck.GetActive());
         connectButton.SetSensitive(!busy);
         cancelButton.SetSensitive(!busy);
     }
