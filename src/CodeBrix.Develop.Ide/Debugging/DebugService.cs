@@ -83,23 +83,53 @@ public static class DebugService
     public static async Task StartAsync(DotNetProject project, IReadOnlyList<string>? programArguments = null,
         IReadOnlyDictionary<string, string>? environment = null)
     {
-        lock (gate)
-        {
-            if (session != null)
-                throw new InvalidOperationException("A debug session is already active");
-        }
+        RequireNoActiveSession();
 
         var program = await project.GetOutputExecutableAsync().ConfigureAwait(false);
         if (!File.Exists(program))
             throw new FileNotFoundException($"The built executable was not found: {program}", program);
 
-        var breakpointsByFile = Breakpoints.GetFiles()
-            .ToDictionary(file => (string) file, file => Breakpoints.GetLines(file));
+        var newSession = await DebugSession.LaunchAsync(
+            DebugSession.DefaultDebuggerPath, program, project.BaseDirectory, BreakpointsByFile(),
+            programArguments, environment).ConfigureAwait(false);
+        Attach(newSession);
+    }
+
+    /// <summary>
+    /// Launches a session against a debug adapter that is already running
+    /// somewhere else — on an SSH device, over the exec channel the transport
+    /// wraps. The program and working directory are the ADAPTER's paths (so,
+    /// for a device, paths on the device); the breakpoints stay local, and
+    /// match because the deployed PDBs carry this machine's source paths.
+    /// The session owns the transport and disposes it when it ends.
+    /// </summary>
+    public static async Task StartRemoteAsync(IDebuggerTransport transport, string program, string workingDirectory,
+        IReadOnlyDictionary<string, string>? environment = null)
+    {
+        RequireNoActiveSession();
 
         var newSession = await DebugSession.LaunchAsync(
-            DebugSession.DefaultDebuggerPath, program, project.BaseDirectory, breakpointsByFile,
-            programArguments, environment).ConfigureAwait(false);
+            transport, program, workingDirectory, BreakpointsByFile(),
+            programArguments: null, environment).ConfigureAwait(false);
+        Attach(newSession);
+    }
 
+    static void RequireNoActiveSession()
+    {
+        lock (gate)
+        {
+            if (session != null)
+                throw new InvalidOperationException("A debug session is already active");
+        }
+    }
+
+    static Dictionary<string, IReadOnlyList<int>> BreakpointsByFile() =>
+        Breakpoints.GetFiles().ToDictionary(file => (string) file, file => Breakpoints.GetLines(file));
+
+    // Wires a freshly launched session to the service's events and makes it
+    // the current one.
+    static void Attach(DebugSession newSession)
+    {
         newSession.Stopped += (reason, threadId) => _ = OnStoppedAsync(newSession, reason);
         newSession.Resumed += () =>
         {

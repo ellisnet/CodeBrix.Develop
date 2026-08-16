@@ -12,6 +12,7 @@ using System.IO;
 using System.Text;
 using System.Threading;
 using CodeBrix.Develop.Core;
+using CodeBrix.Develop.Core.Remote;
 using CodeBrix.SSH;
 
 namespace CodeBrix.Develop.Ide.Remote;
@@ -131,11 +132,10 @@ public static class DeviceLaunch
         SshTerminalSession session, string remoteAppDir, string entryDll, Action<string> onLog,
         int touchRotationDegrees = 0, bool orientationEnabled = false)
     {
-        var orientationSource = orientationEnabled ? "develop" : "none";
-        var environment = "DOTNET_ROOT=\"$HOME/.dotnet\" CODEBRIX_FRAMEBUFFER_USE_DRM=0"
-            + $" CODEBRIX_FRAMEBUFFER_ORIENTATION_SOURCE={orientationSource}";
-        if (touchRotationDegrees != 0)
-            environment += $" CODEBRIX_FRAMEBUFFER_TOUCH_ROTATION={touchRotationDegrees}";
+        // The device's own shell expands $HOME here; a debug launch resolves it
+        // first, because the debug adapter starts the app without a shell.
+        var environment = FrameBufferLaunchEnvironment.ToShellAssignments(
+            FrameBufferLaunchEnvironment.Create("$HOME", touchRotationDegrees, orientationEnabled));
 
         // Launch in the background, print the PID on a marker line so stop can
         // kill it precisely, then wait so the channel stays open for the app's
@@ -172,6 +172,70 @@ public static class DeviceLaunch
     public static string SendOrientationCommand(string orientation) =>
         "dbus-send --system --type=signal /com/codebrix/platform/FrameBuffer " +
         $"com.codebrix.platform.FrameBuffer.DeviceOrientation string:{orientation}";
+
+    /// <summary>
+    /// Blanks the device's screen to black, so a stopped application cannot
+    /// leave a live-looking picture behind. /dev/fb0 belongs to the video
+    /// group the device user is already in, so this needs no sudo; dd stops at
+    /// the end of the framebuffer with a write error, which is the expected
+    /// end of the copy rather than a failure.
+    /// </summary>
+    public const string BlankFrameBufferCommand = "dd if=/dev/zero of=/dev/fb0 bs=1M 2>/dev/null; true";
+
+    /// <summary>
+    /// The device user's home directory, resolved once so the debug adapter
+    /// can be given absolute paths (it starts the application itself, with no
+    /// shell in between to expand <c>$HOME</c>). Blocks on the device — call
+    /// it off the UI thread.
+    /// </summary>
+    public static string ResolveHomeDirectory(SshTerminalSession session)
+    {
+        var home = (session.RunCommand(RemoteDebugger.HomeDirectoryCommand).Output ?? "").Trim();
+        if (string.IsNullOrEmpty(home))
+            throw new InvalidOperationException("The device did not report a home directory for the login user.");
+        return home.TrimEnd('/');
+    }
+
+    /// <summary>
+    /// Copies the IDE's own debug adapter to the device (incrementally, like
+    /// any deploy) and restores the executable bits SFTP does not carry — the
+    /// adapter itself, and the application's native launcher when it has one
+    /// (<paramref name="remoteApplicationLauncher"/> null when the publish
+    /// produced only a managed assembly, which needs no bit). Returns the
+    /// number of adapter files uploaded: the whole bundle the first time, and
+    /// nothing on every later debug.
+    /// </summary>
+    public static int DeployDebugger(SshTerminalSession session, SftpClient sftp, string localDebuggerDirectory,
+        string home, string? remoteApplicationLauncher, Action<string> onLog)
+    {
+        if (!Directory.Exists(localDebuggerDirectory))
+        {
+            throw new DirectoryNotFoundException(
+                $"The bundled debug adapter was not found at '{localDebuggerDirectory}'; " +
+                "is the CodeBrix.Develop.Debug package present?");
+        }
+
+        var uploaded = Deploy(sftp, localDebuggerDirectory, $"{home}/{RemoteDebugger.RemoteDirectory}", onLog);
+        var executables = new List<string> { RemoteDebugger.RemotePath(home) };
+        if (!string.IsNullOrEmpty(remoteApplicationLauncher))
+            executables.Add(remoteApplicationLauncher);
+        session.RunCommand(RemoteDebugger.MakeExecutableCommand(executables));
+        return uploaded;
+    }
+
+    /// <summary>
+    /// Starts the debug adapter on the device and returns the transport a
+    /// debug session drives it through. The adapter runs in the application's
+    /// own folder with the same environment a plain run uses, so what is being
+    /// debugged is what would otherwise have run.
+    /// </summary>
+    public static SshDebuggerTransport StartDebugger(SshTerminalSession session, string home, string remoteAppDir,
+        int touchRotationDegrees, bool orientationEnabled, Action<string> onLog)
+    {
+        var environment = FrameBufferLaunchEnvironment.Create(home, touchRotationDegrees, orientationEnabled);
+        var command = RemoteDebugger.StartCommand(RemoteDebugger.RemotePath(home), $"{home}/{remoteAppDir}", environment);
+        return new SshDebuggerTransport(session, command, onLog);
+    }
 }
 
 /// <summary>
@@ -263,12 +327,6 @@ public sealed class RemoteApplication : IDisposable
     // died rather than assuming it did.
     const string StoppedMarker = "__CODEBRIX_APP_STOPPED__";
 
-    // Blanks the device's screen to black. /dev/fb0 is writable by the video
-    // group the device user is already in, so this needs no sudo. dd stops at
-    // the end of the framebuffer with a write error; that is the expected end
-    // of the copy, not a failure.
-    const string BlankFrameBufferCommand = "dd if=/dev/zero of=/dev/fb0 bs=1M 2>/dev/null; true";
-
     /// <summary>
     /// Stops the app: TERM the remote process, escalate to KILL if it lingers,
     /// then confirm it is really gone before reporting — and blank the device's
@@ -297,7 +355,7 @@ public sealed class RemoteApplication : IDisposable
                 {
                     // Only blank once the app is confirmed gone — blanking a
                     // screen the app is still drawing to proves nothing.
-                    session.RunCommand(BlankFrameBufferCommand);
+                    session.RunCommand(DeviceLaunch.BlankFrameBufferCommand);
                 }
                 else
                 {

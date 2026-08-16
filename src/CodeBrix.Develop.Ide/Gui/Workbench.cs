@@ -89,6 +89,12 @@ public class Workbench
     // The app currently running on the active FrameBuffer device, if any.
     RemoteApplication? runningDeviceApp;
 
+    // The device a debug session is running ON, while one is. Unlike a run,
+    // the debugged app has no RemoteApplication handle — the debug adapter
+    // owns it — so this is what tells the end-of-session cleanup that there
+    // is a device screen to blank.
+    SshTerminalSession? debuggingDevice;
+
     // Develop's own record of the last orientation it told the device app to
     // take (the app cannot report back); null until the first send of a run.
     FrameBufferDeviceOrientation? deviceAppOrientation;
@@ -1482,7 +1488,7 @@ public class Workbench
         frameBufferEmulator = null;
         closeEmulatorAction?.SetEnabled(false);
         // Rotate stays available if it still has a device app to turn.
-        rotateEmulatorAction?.SetEnabled(runningDeviceApp is not null);
+        rotateEmulatorAction?.SetEnabled(DeviceWithLiveApplication is not null);
         // Closing the emulator with an app running terminates the app — the
         // user unplugged the device.
         if (frameBufferEmulationRunning)
@@ -1562,10 +1568,15 @@ public class Workbench
     // device the instruction is broadcast to the running app, which honors it
     // only within its own AutoRotationEnabled rules — a refusal is silent,
     // exactly as a physically turned device would be silently ignored.
+    // The device an application of ours is live on right now — running, or
+    // running under the debugger — and null when nothing of ours is on a
+    // device. Orientation instructions go to it.
+    SshTerminalSession? DeviceWithLiveApplication =>
+        debuggingDevice ?? (runningDeviceApp is not null ? activeFrameBufferDevice : null);
+
     void RotateFrameBufferEmulator()
     {
-        if (runningDeviceApp is not null && activeFrameBufferDevice is not null
-            && IdePreferences.SshDeviceEnableOrientation.Value)
+        if (DeviceWithLiveApplication is not null && IdePreferences.SshDeviceEnableOrientation.Value)
         {
             // Develop tracks the cycle itself, since the app cannot report
             // back. It starts from the device's resting (native) orientation,
@@ -1610,6 +1621,20 @@ public class Workbench
 
         if (StartupHeadPolicy.IsFrameBufferHead(project.Name))
         {
+            // A device that reached "ready" takes the place of the emulator —
+            // but only when it was connected FOR debugging: the provisioning
+            // that makes a device debuggable happens on that checkbox alone.
+            // A ready device that is not debug-enabled falls back to the
+            // emulator rather than refusing, and says why.
+            if (activeFrameBufferDevice is { } device && IdePreferences.SshDeviceEnableDebugging.Value)
+            {
+                await DebugOnDeviceAsync(project, device);
+                return;
+            }
+            if (activeFrameBufferDevice is not null)
+            {
+                ShowStatus("Debugging in the emulator — reconnect the device with \"Enable for SSH Debugging\" to debug on it.");
+            }
             await DebugFrameBufferEmulatedAsync(project);
             return;
         }
@@ -1672,6 +1697,7 @@ public class Workbench
     void OnDebugEnded(int? exitCode)
     {
         CleanupFrameBufferSession();
+        CleanupDeviceDebugSession();
         OnDebugResumed();
         DisableStopUnlessEmulating();
         ShowStatus(exitCode is { } code ? $"Debugging ended — exit code {code}" : "Debugging ended");
@@ -1703,8 +1729,16 @@ public class Workbench
 
     async Task RunAsync()
     {
-        if (IdeApp.CurrentSolution is not { } solution || runService.IsBusy || DebugService.IsSessionActive)
+        if (IdeApp.CurrentSolution is not { } solution || runService.IsBusy)
             return;
+        if (DebugService.IsSessionActive)
+        {
+            // Silently doing nothing reads as a broken Run button — most
+            // easily hit with a device session, where the debugger is on the
+            // tablet and there is nothing on screen here to suggest why.
+            ShowStatus("A debug session is running — stop it before running.");
+            return;
+        }
         if (ResolveStartupProjectForLaunch(solution) is not { } project)
             return;
 
@@ -1813,16 +1847,7 @@ public class Workbench
             // both blit the screen and both receive every touch — and the head
             // itself now refuses to start one. Run replaces run: stop the
             // previous instance before its files are overwritten by the deploy.
-            if (runningDeviceApp is { } previous)
-            {
-                applicationOutput.AppendLine("Stopping the previous instance on the device…");
-                runningDeviceApp = null;
-                await Task.Run(() =>
-                {
-                    previous.Stop();
-                    previous.Dispose();
-                });
-            }
+            await StopRunningDeviceApplicationAsync();
 
             ShowStatus($"Deploying to {device.DisplayName}…");
             var uploaded = await Task.Run(() =>
@@ -1888,6 +1913,205 @@ public class Workbench
                 DisableStopUnlessEmulating();
             }
         }
+    }
+
+    // Deploy + debug a .LinuxFrameBuffer head on the active SSH device: the
+    // same publish and deploy a device run does, plus the IDE's own debug
+    // adapter copied to the device and started over an SSH exec channel. Its
+    // DAP stdio rides that channel into the ordinary debug session, so
+    // breakpoints, stepping, the call stack and hover evaluation work exactly
+    // as they do locally — the app is simply drawing on the tablet's screen.
+    // Source paths need no mapping: the PDBs were built here and carry this
+    // machine's paths, which is what the breakpoints are set against.
+    async Task DebugOnDeviceAsync(DotNetProject project, SshTerminalSession device)
+    {
+        var architecture = IdePreferences.SshDeviceArchitecture.Value;
+        var rid = DeviceRid.ForArchitecture(architecture);
+        if (rid == null)
+        {
+            ShowStatus($"Cannot debug: the device architecture '{architecture}' is not recognized.");
+            return;
+        }
+        // The bundled adapter is a native binary for the IDE host's own
+        // architecture. Publishing already tracks the device, so only
+        // debugging is blocked by a mismatch — and it says so rather than
+        // failing on the device with an exec-format error.
+        if (!RemoteDebugger.CanDebugDevice(rid))
+        {
+            applicationOutput.Clear();
+            ShowBottomTab(applicationOutput.Widget);
+            applicationOutput.AppendLine(RemoteDebugger.IncompatibleDeviceMessage(rid));
+            ShowStatus("Cannot debug on this device — the bundled debugger is for a different architecture.");
+            return;
+        }
+
+        if (deviceLaunchInFlight)
+        {
+            ShowStatus("A launch to the device is already in progress.");
+            return;
+        }
+        deviceLaunchInFlight = true;
+
+        documentManager.SaveAll();
+        applicationOutput.Clear();
+        ShowBottomTab(applicationOutput.Widget);
+        stopAction?.SetEnabled(true);
+        // Stop before the adapter is up cancels the publish; once the session
+        // exists, Stop goes to the debugger instead (StopRunOrDebug asks it
+        // first), so this cancellation is released as soon as it is running.
+        var cancellation = new CancellationTokenSource();
+        runCancellation = cancellation;
+
+        var appName = project.Name;
+        var remoteDir = DeviceLaunch.RemoteAppDirectory(appName);
+        var publishDir = Path.Combine(Path.GetTempPath(), "CodeBrix.Develop", "publish", appName);
+        var started = false;
+        try
+        {
+            ShowStatus($"Publishing {project.Name} for {rid}…");
+            applicationOutput.AppendLine($"Publishing {project.Name} for {rid}…");
+            var publishResult = await runService.PublishAsync(project.FileName, rid, publishDir, cancellation.Token);
+            if (!publishResult.Success)
+            {
+                ShowStatus("Publish failed — see Application Output");
+                return;
+            }
+
+            if (!await EnsureDeviceFilesystemWritableAsync(device))
+            {
+                applicationOutput.AppendLine(
+                    "Canceled: the device's filesystem is mounted read-only, so the application cannot be copied to it.");
+                ShowStatus("Debugging canceled — the device's filesystem is read-only.");
+                return;
+            }
+
+            if (!await EnsureFrameBufferConsoleDetachedAsync(device))
+            {
+                applicationOutput.AppendLine(
+                    "Canceled: the device's text console still owns its screen, so the application would share it with a blinking cursor.");
+                ShowStatus("Debugging canceled — the device's text console still owns the screen.");
+                return;
+            }
+
+            // Same rule as a run: one instance owns the framebuffer, and the
+            // files about to be overwritten belong to whatever is running now.
+            await StopRunningDeviceApplicationAsync();
+
+            ShowStatus($"Deploying to {device.DisplayName}…");
+            var home = await Task.Run(() => DeviceLaunch.ResolveHomeDirectory(device));
+
+            // The adapter starts the app itself, so it is handed the native
+            // launcher when the publish produced one (which is what a local
+            // debug session is given too) and the managed assembly otherwise.
+            // A launcher needs its executable bit back after the copy; an
+            // assembly does not.
+            var hasNativeLauncher = File.Exists(Path.Combine(publishDir, appName));
+            var program = hasNativeLauncher
+                ? $"{home}/{remoteDir}/{appName}"
+                : $"{home}/{remoteDir}/{appName}.dll";
+
+            var uploaded = await Task.Run(() =>
+            {
+                using var sftp = device.CreateSftpClient();
+                var appFiles = DeviceLaunch.Deploy(sftp, publishDir, remoteDir,
+                    line => uiContext.Post(_ => applicationOutput.AppendLine(line), null));
+                // The adapter is the same bundle every time, so this uploads
+                // the whole of it once per device and nothing thereafter.
+                var debuggerFiles = DeviceLaunch.DeployDebugger(device, sftp,
+                    Path.Combine(AppContext.BaseDirectory, RemoteDebugger.BundleFolderName), home,
+                    hasNativeLauncher ? program : null,
+                    line => uiContext.Post(_ => applicationOutput.AppendLine(line), null));
+                return (appFiles, debuggerFiles);
+            });
+            applicationOutput.AppendLine($"Deployed {uploaded.appFiles} changed file(s) to ~/{remoteDir}.");
+            if (uploaded.debuggerFiles > 0)
+                applicationOutput.AppendLine($"Deployed the debugger ({uploaded.debuggerFiles} file(s)) to ~/{RemoteDebugger.RemoteDirectory}.");
+
+            await CheckDeviceRenderPrerequisitesAsync(device);
+
+            ShowStatus($"Debugging {project.Name} on {device.DisplayName}…");
+            var touchRotation = IdePreferences.SshDeviceTouchRotation.Value;
+            var orientationEnabled = IdePreferences.SshDeviceEnableOrientation.Value;
+            var transport = await Task.Run(() => DeviceLaunch.StartDebugger(device, home, remoteDir,
+                touchRotation, orientationEnabled,
+                line => uiContext.Post(_ => applicationOutput.AppendLine(line), null)));
+            try
+            {
+                await DebugService.StartRemoteAsync(transport, program, $"{home}/{remoteDir}",
+                    FrameBufferLaunchEnvironment.CreateMap(home, touchRotation, orientationEnabled));
+            }
+            catch (Exception)
+            {
+                // The adapter never got as far as a running debuggee; close
+                // the channel rather than leaving it open on the device.
+                transport.Dispose();
+                throw;
+            }
+
+            debuggingDevice = device;
+            started = true;
+            stopAction?.SetEnabled(true);
+            // A fresh launch is back in the app's own start orientation.
+            deviceAppOrientation = null;
+            SetDeviceOrientationActionsEnabled(orientationEnabled);
+            if (orientationEnabled)
+                rotateEmulatorAction?.SetEnabled(true);
+        }
+        catch (Exception ex)
+        {
+            LoggingService.LogError("Debugging on the device failed", ex);
+            applicationOutput.AppendLine($"Debugging on the device failed: {ex.Message}");
+            ShowStatus($"Debugging on the device failed: {ex.Message}");
+        }
+        finally
+        {
+            deviceLaunchInFlight = false;
+            cancellation.Dispose();
+            if (ReferenceEquals(runCancellation, cancellation))
+                runCancellation = null;
+            if (!started)
+                DisableStopUnlessEmulating();
+        }
+    }
+
+    // Stops whatever application is running on the device from a plain run, so
+    // the files it holds can be replaced and the framebuffer's single-instance
+    // lock is free for the next launch. A no-op when nothing is running.
+    async Task StopRunningDeviceApplicationAsync()
+    {
+        if (runningDeviceApp is not { } previous)
+            return;
+        applicationOutput.AppendLine("Stopping the previous instance on the device…");
+        runningDeviceApp = null;
+        await Task.Run(() =>
+        {
+            previous.Stop();
+            previous.Dispose();
+        });
+    }
+
+    // A device debug session ended (the app exited, the user stopped it, or the
+    // adapter died): the app is gone with the adapter, so the screen it was
+    // drawing on is blanked, exactly as stopping a plain run does.
+    void CleanupDeviceDebugSession()
+    {
+        if (debuggingDevice is not { } device)
+            return;
+        debuggingDevice = null;
+        deviceAppOrientation = null;
+        SetDeviceOrientationActionsEnabled(false);
+        rotateEmulatorAction?.SetEnabled(frameBufferEmulator is not null);
+        _ = Task.Run(() =>
+        {
+            try
+            {
+                device.RunCommand(DeviceLaunch.BlankFrameBufferCommand);
+            }
+            catch (Exception ex)
+            {
+                LoggingService.LogInfo($"Blanking the device screen after debugging: {ex.Message}");
+            }
+        });
     }
 
     // Reports render/input prerequisites to Application Output, using the same
@@ -2166,6 +2390,16 @@ public class Workbench
             DisableStopUnlessEmulating();
             ShowStatus("The FrameBuffer device disconnected — the app on it has stopped.");
         }
+        if (debuggingDevice is not null)
+        {
+            // The debug adapter rode the connection that just went away, so
+            // the session is already over — tear it down rather than leave a
+            // debugger the IDE can no longer reach. There is no device left to
+            // blank the screen of, so that part is skipped.
+            debuggingDevice = null;
+            DebugService.Shutdown(clearBreakpoints: false);
+            ShowStatus("The FrameBuffer device disconnected — the debug session on it has ended.");
+        }
     }
 
     // The SSH-debugging provisioning walk. Each unmet prerequisite gets a modal
@@ -2321,8 +2555,7 @@ public class Workbench
     // as a physically turned device would be silently ignored.
     async Task SendDeviceOrientationAsync(string orientation)
     {
-        if (activeFrameBufferDevice is not { } device || runningDeviceApp is null
-            || !IdePreferences.SshDeviceEnableOrientation.Value)
+        if (DeviceWithLiveApplication is not { } device || !IdePreferences.SshDeviceEnableOrientation.Value)
             return;
         try
         {

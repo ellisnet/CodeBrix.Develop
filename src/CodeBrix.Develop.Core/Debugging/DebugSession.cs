@@ -9,7 +9,6 @@
 
 using System;
 using System.Collections.Generic;
-using System.Diagnostics;
 using System.IO;
 using System.Linq;
 using System.Text.Json;
@@ -45,13 +44,17 @@ public class EvaluationResult
 }
 
 /// <summary>
-/// One live debugging session: launches the bundled CodeBrix.Develop.Debug
-/// (netcoredbg) debugger, speaks DAP to it, and surfaces the events and
-/// commands the IDE needs. Create with <see cref="LaunchAsync"/>.
+/// One live debugging session: drives the CodeBrix.Develop.Debug (netcoredbg)
+/// debugger over DAP and surfaces the events and commands the IDE needs. The
+/// debugger itself sits behind an <see cref="IDebuggerTransport"/>, so the
+/// same session semantics serve a debugger running locally as a child process
+/// and one running on a device at the far end of an SSH channel. Create with
+/// <see cref="LaunchAsync(string,string,string,IReadOnlyDictionary{string,IReadOnlyList{int}},IReadOnlyList{string},IReadOnlyDictionary{string,string},CancellationToken)"/>
+/// (local) or its transport overload (remote).
 /// </summary>
 public class DebugSession : IDisposable
 {
-    Process process;
+    IDebuggerTransport transport;
     DapClient client;
     int stoppedThreadId = -1;
     volatile bool paused;
@@ -88,7 +91,7 @@ public class DebugSession : IDisposable
     /// Optional command-line arguments are passed to the debuggee (e.g. the
     /// test filter of a debug-this-test launch).
     /// </summary>
-    public static async Task<DebugSession> LaunchAsync(string debuggerPath, string program, string workingDirectory,
+    public static Task<DebugSession> LaunchAsync(string debuggerPath, string program, string workingDirectory,
         IReadOnlyDictionary<string, IReadOnlyList<int>> breakpointsByFile,
         IReadOnlyList<string> programArguments = null,
         IReadOnlyDictionary<string, string> environment = null, CancellationToken cancellationToken = default)
@@ -98,28 +101,30 @@ public class DebugSession : IDisposable
         if (!File.Exists(program))
             throw new FileNotFoundException("The program to debug was not found; build it first.", program);
 
-        var session = new DebugSession();
-        var startInfo = new ProcessStartInfo(debuggerPath)
-        {
-            WorkingDirectory = workingDirectory,
-            RedirectStandardInput = true,
-            RedirectStandardOutput = true,
-            RedirectStandardError = true,
-            UseShellExecute = false,
-        };
-        startInfo.ArgumentList.Add("--interpreter=vscode");
+        return LaunchAsync(ProcessDebuggerTransport.Start(debuggerPath, workingDirectory),
+            program, workingDirectory, breakpointsByFile, programArguments, environment, cancellationToken);
+    }
 
-        session.process = new Process { StartInfo = startInfo, EnableRaisingEvents = true };
-        session.process.ErrorDataReceived += (_, e) =>
-        {
-            if (e.Data != null)
-                LoggingService.LogWarning($"netcoredbg: {e.Data}");
-        };
-        if (!session.process.Start())
-            throw new InvalidOperationException("The debugger process could not be started");
-        session.process.BeginErrorReadLine();
+    /// <summary>
+    /// Starts a session over an already-running debug adapter, launches the
+    /// program under it with the given breakpoints applied, and returns once
+    /// the debuggee is running. The paths are the DEBUGGER's: for a device
+    /// session <paramref name="program"/> and
+    /// <paramref name="workingDirectory"/> name files on the device, while the
+    /// breakpoint paths stay local — the deployed PDBs carry the build
+    /// machine's source paths, so the two match without any mapping. The
+    /// session owns <paramref name="transport"/> and disposes it.
+    /// </summary>
+    public static async Task<DebugSession> LaunchAsync(IDebuggerTransport transport, string program, string workingDirectory,
+        IReadOnlyDictionary<string, IReadOnlyList<int>> breakpointsByFile,
+        IReadOnlyList<string> programArguments = null,
+        IReadOnlyDictionary<string, string> environment = null, CancellationToken cancellationToken = default)
+    {
+        if (transport == null)
+            throw new ArgumentNullException(nameof(transport));
 
-        session.client = new DapClient(session.process.StandardOutput.BaseStream, session.process.StandardInput.BaseStream);
+        var session = new DebugSession { transport = transport };
+        session.client = new DapClient(transport.Input, transport.Output);
         var initialized = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
         session.client.EventReceived += (eventName, body) => session.OnEvent(eventName, body, initialized);
         session.client.ConnectionClosed += () => session.OnConnectionClosed();
@@ -323,17 +328,9 @@ public class DebugSession : IDisposable
     /// <summary>Tears the session down, killing the debugger if needed.</summary>
     public void Dispose()
     {
-        try
-        {
-            if (process is { HasExited: false })
-                process.Kill(entireProcessTree: true);
-        }
-        catch
-        {
-            // the process may have already exited
-        }
+        transport?.Terminate();
         client?.Dispose();
-        process?.Dispose();
+        transport?.Dispose();
         EndSession(null);
     }
 }
