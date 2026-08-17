@@ -62,6 +62,13 @@ public sealed class KnownFrameBufferDevice
             touchRotationDegrees: 180),
         new KnownFrameBufferDevice("WinBook", "TW802",
             FrameBufferResolution.EightInch800x1280, FrameBufferOrientation.Portrait),
+        // Sold as the NuVision TM800W610L, but its DMI sys_vendor is "TMAX"
+        // (captured on-device 2026-08-17, as is the portrait-native screen via
+        // /sys/class/graphics/fb0). At ~283 ppi it is the first device expected
+        // to want ScaleUserInterface(Percent150). Touch rotation is provisional
+        // until a live touch test.
+        new KnownFrameBufferDevice("TMAX", "TM800W610L",
+            FrameBufferResolution.EightInch1200x1920, FrameBufferOrientation.Portrait),
     };
 
     // Devices on the way to test — add each above once its REAL DMI sys_vendor
@@ -74,13 +81,6 @@ public sealed class KnownFrameBufferDevice
     //                                    -> EightInch800x1280 (exists)
     //   Asus VivoTab Note 8 (aka M80T) — 8-inch, 800 x 1280,  portrait(?)
     //                                    -> EightInch800x1280 (exists)
-    //   NuVision TM800W610L            — 8-inch, 1200 x 1920, portrait(?)
-    //                                    -> EightInch1200x1920 (exists; added as a
-    //                                       screen distinct from the 10-inch one of
-    //                                       the same dimensions, since the size
-    //                                       class is the identity). At ~283 ppi it
-    //                                       is also the first device expected to
-    //                                       want ScaleUserInterface(Percent150).
 
     /// <summary>
     /// Finds the catalog entry for a reported vendor and model —

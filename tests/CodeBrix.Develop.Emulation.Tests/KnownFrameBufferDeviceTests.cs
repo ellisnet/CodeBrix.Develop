@@ -35,6 +35,19 @@ public class KnownFrameBufferDeviceTests
     }
 
     [Fact]
+    public void The_nuvision_tm800w610l_identifies_by_its_tmax_dmi_vendor()
+    {
+        //Act — sold as "NuVision", but the DMI sys_vendor really is "TMAX"
+        var device = KnownFrameBufferDevice.TryFind("TMAX", "TM800W610L");
+
+        //Assert
+        device.Should().NotBeNull();
+        device.Screen.Should().Be(FrameBufferResolution.EightInch1200x1920);
+        device.NativeOrientation.Should().Be(FrameBufferOrientation.Portrait);
+        device.TouchRotationDegrees.Should().Be(0);
+    }
+
+    [Fact]
     public void Lookup_ignores_case_and_the_trailing_newlines_of_dmi_files()
         => KnownFrameBufferDevice.TryFind("winbook\n", " tw700 ").Should().NotBeNull();
 
