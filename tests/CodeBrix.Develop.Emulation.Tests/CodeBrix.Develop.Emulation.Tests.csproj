@@ -11,8 +11,8 @@
   </PropertyGroup>
 
   <ItemGroup>
-    <PackageReference Include="xunit.v3" Version="3.2.2" />
-    <PackageReference Include="SilverAssertions.ApacheLicenseForever" Version="1.0.164.180" />
+    <PackageReference Include="xunit.v3" Version="4.0.0" />
+    <PackageReference Include="SilverAssertions.ApacheLicenseForever" Version="1.0.248.1071" />
   </ItemGroup>
 
   <ItemGroup>

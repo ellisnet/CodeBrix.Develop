@@ -15,8 +15,8 @@
 
   <ItemGroup>
     <PackageReference Include="CodeBrix.Develop.UI" Version="1.0.202.186" />
-    <PackageReference Include="CodeBrix.SSH.MitLicenseForever" Version="1.0.221.1302" />
-    <PackageReference Include="CodeBrix.Terminal.MitLicenseForever" Version="1.0.165.232" />
+    <PackageReference Include="CodeBrix.SSH.MitLicenseForever" Version="1.0.250.24" />
+    <PackageReference Include="CodeBrix.Terminal.MitLicenseForever" Version="1.0.250.30" />
   </ItemGroup>
 
   <ItemGroup>
