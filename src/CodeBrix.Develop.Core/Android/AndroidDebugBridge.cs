@@ -342,4 +342,134 @@ public static class AndroidDebugBridge
     /// caller can show it in the same place as the rest of the run output.
     /// </summary>
     public static event Action<string> OutputReceived;
+
+    /// <summary>
+    /// The message of the exception the general-purpose runners throw when no
+    /// Android SDK can be found. They cannot answer "false" like
+    /// <see cref="ForceStopAsync"/> does: a debug session that cannot run adb
+    /// has not failed to stop something, it cannot start at all.
+    /// </summary>
+    public const string NoSdkMessage =
+        "no Android SDK found (looked at ANDROID_HOME, ANDROID_SDK_ROOT and ~/Android/Sdk)";
+
+    /// <summary>
+    /// Runs adb against one device and returns everything it said. The
+    /// arguments are passed AFTER "-s &lt;serial&gt;", so they are the adb
+    /// command itself ("shell", "push", "forward", …). Throws
+    /// <see cref="InvalidOperationException"/> when adb cannot be found; a
+    /// command that runs and fails comes back as a result with the exit code
+    /// and the error text, because "the device said no" is an answer and not
+    /// an exception.
+    /// </summary>
+    public static async Task<AdbResult> RunAsync(string serial, IReadOnlyList<string> arguments,
+        CancellationToken cancellationToken = default)
+    {
+        if (arguments == null)
+            throw new ArgumentNullException(nameof(arguments));
+
+        var adb = FindAdb();
+        if (adb == null)
+            throw new InvalidOperationException($"Cannot run adb: {NoSdkMessage}.");
+
+        var startInfo = new ProcessStartInfo(adb)
+        {
+            RedirectStandardOutput = true,
+            RedirectStandardError = true,
+            UseShellExecute = false,
+        };
+        if (!string.IsNullOrWhiteSpace(serial))
+        {
+            startInfo.ArgumentList.Add("-s");
+            startInfo.ArgumentList.Add(serial);
+        }
+        foreach (var argument in arguments)
+            startInfo.ArgumentList.Add(argument);
+
+        OutputReceived?.Invoke($"{adb} {string.Join(' ', startInfo.ArgumentList)}");
+
+        using var process = new Process { StartInfo = startInfo, EnableRaisingEvents = true };
+        if (!process.Start())
+            throw new InvalidOperationException($"adb could not be started ({adb}).");
+
+        // Both streams are drained concurrently: a command that writes more
+        // than a pipe buffer to one of them would block forever if the other
+        // were read first.
+        var standardOutput = process.StandardOutput.ReadToEndAsync(cancellationToken);
+        var standardError = process.StandardError.ReadToEndAsync(cancellationToken);
+        await process.WaitForExitAsync(cancellationToken).ConfigureAwait(false);
+        return new AdbResult(process.ExitCode,
+            await standardOutput.ConfigureAwait(false),
+            await standardError.ConfigureAwait(false));
+    }
+
+    /// <summary>
+    /// Runs one shell command on the device. The command is passed as a
+    /// SINGLE argument, so the device's own shell parses it — which is what
+    /// lets a command carry redirections, pipes and quoting of its own.
+    /// </summary>
+    public static Task<AdbResult> ShellAsync(string serial, string command,
+        CancellationToken cancellationToken = default) =>
+        RunAsync(serial, new[] { "shell", command }, cancellationToken);
+
+    /// <summary>Copies one local file to the device.</summary>
+    public static Task<AdbResult> PushAsync(string serial, string localPath, string remotePath,
+        CancellationToken cancellationToken = default) =>
+        RunAsync(serial, new[] { "push", localPath, remotePath }, cancellationToken);
+
+    /// <summary>
+    /// Publishes a device port on this machine's loopback interface, so a
+    /// server listening on the device can be connected to as though it were
+    /// local.
+    /// </summary>
+    public static Task<AdbResult> ForwardAsync(string serial, int hostPort, int devicePort,
+        CancellationToken cancellationToken = default) =>
+        RunAsync(serial, new[] { "forward", $"tcp:{hostPort}", $"tcp:{devicePort}" }, cancellationToken);
+
+    /// <summary>
+    /// Withdraws a forward made by <see cref="ForwardAsync"/>. Forwards
+    /// outlive the process that made them, so a session that ends without
+    /// removing its own leaves the host port claimed until adb is restarted.
+    /// </summary>
+    public static Task<AdbResult> RemoveForwardAsync(string serial, int hostPort,
+        CancellationToken cancellationToken = default) =>
+        RunAsync(serial, new[] { "forward", "--remove", $"tcp:{hostPort}" }, cancellationToken);
+}
+
+/// <summary>
+/// What one adb command said: its exit code and both of its output streams.
+/// </summary>
+public sealed class AdbResult
+{
+    /// <summary>Creates a result for a finished adb command.</summary>
+    public AdbResult(int exitCode, string standardOutput, string standardError)
+    {
+        ExitCode = exitCode;
+        StandardOutput = standardOutput ?? "";
+        StandardError = standardError ?? "";
+    }
+
+    /// <summary>adb's exit code; zero when the command succeeded.</summary>
+    public int ExitCode { get; }
+
+    /// <summary>Everything the command wrote to standard output.</summary>
+    public string StandardOutput { get; }
+
+    /// <summary>
+    /// Everything the command wrote to standard error. adb reports its own
+    /// failures here ("device not found", "more than one device"), while a
+    /// shell command's failure text may arrive on either stream.
+    /// </summary>
+    public string StandardError { get; }
+
+    /// <summary>Whether the command exited zero.</summary>
+    public bool Succeeded => ExitCode == 0;
+
+    /// <summary>
+    /// The output, with standard error appended when it said anything — what
+    /// a caller wants to show a user, and what a parser wants to read when
+    /// the interesting text could have arrived on either stream.
+    /// </summary>
+    public string CombinedOutput => StandardError.Trim().Length == 0
+        ? StandardOutput
+        : $"{StandardOutput}{StandardError}";
 }

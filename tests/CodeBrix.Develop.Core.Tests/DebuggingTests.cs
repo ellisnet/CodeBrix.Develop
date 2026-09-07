@@ -202,3 +202,247 @@ public class DapClientTests : IDisposable
         thread.Should().Be(7);
     }
 }
+
+/// <summary>
+/// The ATTACH handshake, which is what an Android session runs: the program
+/// is already running (Android started it), so there is nothing to launch and
+/// the adapter is only told which process to take over. The order is the part
+/// that matters — the attach response does not arrive until configuration is
+/// done, so the request has to be in flight while the breakpoints are sent.
+/// </summary>
+public class DebugSessionAttachTests : IDisposable
+{
+    // The IDE side of the wire; the "adapter" is this test.
+    readonly AnonymousPipeServerStream toAdapter = new AnonymousPipeServerStream(PipeDirection.Out);
+    readonly AnonymousPipeServerStream fromAdapter = new AnonymousPipeServerStream(PipeDirection.In);
+    readonly AnonymousPipeClientStream adapterIn;
+    readonly AnonymousPipeClientStream adapterOut;
+    readonly PipeTransport transport;
+    readonly List<string> commands = new List<string>();
+    DebugSession session;
+
+    public DebugSessionAttachTests()
+    {
+        adapterIn = new AnonymousPipeClientStream(PipeDirection.In, toAdapter.ClientSafePipeHandle);
+        adapterOut = new AnonymousPipeClientStream(PipeDirection.Out, fromAdapter.ClientSafePipeHandle);
+        transport = new PipeTransport(fromAdapter, toAdapter, CloseAdapterEnd);
+    }
+
+    // Ending the adapter is what unblocks the session's reader — the same
+    // thing killing the debugger process does in production.
+    void CloseAdapterEnd()
+    {
+        adapterOut.Dispose();
+        adapterIn.Dispose();
+    }
+
+    public void Dispose()
+    {
+        CloseAdapterEnd();
+        session?.Dispose();
+        toAdapter.Dispose();
+        fromAdapter.Dispose();
+    }
+
+    [Fact]
+    public async Task AttachAsync_initializes_attaches_sets_breakpoints_then_finishes_configuration()
+    {
+        //Arrange
+        var breakpoints = new Dictionary<string, IReadOnlyList<int>>
+        {
+            ["/src/SimpleDebugApp/MainActivity.cs"] = new[] { 47, 63 },
+        };
+
+        //Act — the session, and the adapter answering it
+        var attaching = DebugSession.AttachAsync(transport, 4321, breakpoints, TimeSpan.FromSeconds(30),
+            TestContext.Current.CancellationToken);
+
+        var initialize = ReadRequest();
+        Respond(initialize);
+
+        // The attach request is in flight from here on: its response is the
+        // last thing to arrive, after configurationDone.
+        var attach = ReadRequest();
+        attach.Arguments.GetProperty("processId").GetInt32().Should().Be(4321);
+        SendEvent("initialized");
+
+        var setBreakpoints = ReadRequest();
+        setBreakpoints.Arguments.GetProperty("source").GetProperty("path").GetString()
+            .Should().Be("/src/SimpleDebugApp/MainActivity.cs");
+        setBreakpoints.Arguments.GetProperty("breakpoints").GetArrayLength().Should().Be(2);
+        Respond(setBreakpoints);
+
+        var configurationDone = ReadRequest();
+        Respond(configurationDone);
+        Respond(attach);
+
+        session = await attaching.WaitAsync(TimeSpan.FromSeconds(20), TestContext.Current.CancellationToken);
+
+        //Assert
+        commands.Should().Equal(new[] { "initialize", "attach", "setBreakpoints", "configurationDone" });
+        session.IsPaused.Should().BeFalse();
+    }
+
+    [Fact]
+    public async Task AttachAsync_reports_an_adapter_that_refuses_the_attach_and_lets_go_of_it()
+    {
+        //Act — the real attach happens inside configurationDone, so that is
+        //where an app the debugger cannot take over says so
+        var attaching = DebugSession.AttachAsync(transport, 4321,
+            new Dictionary<string, IReadOnlyList<int>>(), TimeSpan.FromSeconds(30),
+            TestContext.Current.CancellationToken);
+
+        Respond(ReadRequest());          // initialize
+        var attach = ReadRequest();      // in flight, never answered
+        SendEvent("initialized");
+        Fail(ReadRequest(), "process not debuggable");
+
+        //Assert — the failure surfaces, and the transport was let go of
+        var act = async () => await attaching;
+        (await Record.ExceptionAsync(act)).Should().BeOfType<DapException>()
+            .Which.Message.Should().Be("process not debuggable");
+        attach.Command.Should().Be("attach");
+        transport.Terminated.Should().BeTrue();
+    }
+
+    [Fact]
+    public async Task SetExceptionBreakpointsAsync_sends_the_filter_names_and_clears_with_an_empty_list()
+    {
+        //Arrange — an attached session
+        var attaching = DebugSession.AttachAsync(transport, 4321,
+            new Dictionary<string, IReadOnlyList<int>>(), TimeSpan.FromSeconds(30),
+            TestContext.Current.CancellationToken);
+        Respond(ReadRequest());          // initialize
+        var attach = ReadRequest();      // attach, answered last
+        SendEvent("initialized");
+        Respond(ReadRequest());          // configurationDone
+        Respond(attach);
+        session = await attaching.WaitAsync(TimeSpan.FromSeconds(20), TestContext.Current.CancellationToken);
+
+        //Act
+        var settingAll = session.SetExceptionBreakpointsAsync(new[] { DebugSession.AllExceptionsFilter },
+            TestContext.Current.CancellationToken);
+        var setAll = ReadRequest();
+        Respond(setAll);
+        await settingAll.WaitAsync(TimeSpan.FromSeconds(20), TestContext.Current.CancellationToken);
+
+        var clearing = session.SetExceptionBreakpointsAsync(null, TestContext.Current.CancellationToken);
+        var cleared = ReadRequest();
+        Respond(cleared);
+        await clearing.WaitAsync(TimeSpan.FromSeconds(20), TestContext.Current.CancellationToken);
+
+        //Assert
+        setAll.Command.Should().Be("setExceptionBreakpoints");
+        setAll.Arguments.GetProperty("filters").GetArrayLength().Should().Be(1);
+        setAll.Arguments.GetProperty("filters")[0].GetString().Should().Be("all");
+        cleared.Command.Should().Be("setExceptionBreakpoints");
+        cleared.Arguments.GetProperty("filters").GetArrayLength().Should().Be(0);
+    }
+
+    void Respond(AdapterRequest request) => AdapterSend(new
+    {
+        type = "response",
+        request_seq = request.Seq,
+        success = true,
+        command = request.Command,
+        body = new { },
+    });
+
+    void Fail(AdapterRequest request, string message) => AdapterSend(new
+    {
+        type = "response",
+        request_seq = request.Seq,
+        success = false,
+        command = request.Command,
+        message,
+    });
+
+    void SendEvent(string name) => AdapterSend(new { type = "event", @event = name, body = new { } });
+
+    void AdapterSend(object message)
+    {
+        var payload = JsonSerializer.SerializeToUtf8Bytes(message);
+        var header = Encoding.ASCII.GetBytes($"Content-Length: {payload.Length}\r\n\r\n");
+        adapterOut.Write(header);
+        adapterOut.Write(payload);
+        adapterOut.Flush();
+    }
+
+    AdapterRequest ReadRequest()
+    {
+        var length = -1;
+        var line = new StringBuilder();
+        while (true)
+        {
+            var value = adapterIn.ReadByte();
+            value.Should().NotBe(-1);
+            if (value == '\n')
+            {
+                var text = line.ToString().TrimEnd('\r');
+                line.Clear();
+                if (text.Length == 0)
+                    break;
+                if (text.StartsWith("Content-Length:", StringComparison.OrdinalIgnoreCase))
+                    length = int.Parse(text.Substring("Content-Length:".Length).Trim());
+            }
+            else
+            {
+                line.Append((char) value);
+            }
+        }
+        var buffer = new byte[length];
+        var read = 0;
+        while (read < length)
+            read += adapterIn.Read(buffer, read, length - read);
+
+        var document = JsonDocument.Parse(buffer);
+        var request = new AdapterRequest
+        {
+            Seq = document.RootElement.GetProperty("seq").GetInt32(),
+            Command = document.RootElement.GetProperty("command").GetString(),
+            Arguments = document.RootElement.TryGetProperty("arguments", out var arguments)
+                ? arguments.Clone()
+                : default,
+        };
+        document.Dispose();
+        commands.Add(request.Command);
+        return request;
+    }
+
+    sealed class AdapterRequest
+    {
+        internal int Seq { get; set; }
+
+        internal string Command { get; set; }
+
+        internal JsonElement Arguments { get; set; }
+    }
+
+    // A transport over the test's pipes; terminating it ends the "adapter",
+    // exactly as killing the debugger process does.
+    sealed class PipeTransport : IDebuggerTransport
+    {
+        readonly Action onTerminate;
+
+        internal PipeTransport(Stream input, Stream output, Action onTerminate)
+        {
+            Input = input;
+            Output = output;
+            this.onTerminate = onTerminate;
+        }
+
+        public Stream Input { get; }
+
+        public Stream Output { get; }
+
+        internal bool Terminated { get; private set; }
+
+        public void Terminate()
+        {
+            Terminated = true;
+            onTerminate();
+        }
+
+        public void Dispose() => Terminate();
+    }
+}

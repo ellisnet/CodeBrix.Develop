@@ -66,29 +66,29 @@ public class LaunchCapabilityTests : IDisposable
     [Theory]
     [InlineData("net11.0-android37.0")]
     [InlineData("net12.0-android38.0")]
-    public void A_dotnet_11_or_newer_android_project_is_blocked_only_by_the_missing_debugger(
-        string targetFramework)
+    public void A_dotnet_11_or_newer_android_project_can_be_debugged(string targetFramework)
     {
-        // The runtime is right (CoreCLR) and the diagnostics transport was
-        // verified on device, but nothing drives it yet. Saying "not
-        // implemented" is the honest reason; when it IS implemented this
-        // expectation flips to CanDebug, in one place.
+        // The app runs on CoreCLR, and the IDE places its own debugger in the
+        // app's sandbox on the device and drives it over DAP through an adb
+        // port forward. Nothing is left to explain.
         var capability = LaunchCapability.Debugging(ProjectTargeting(targetFramework));
 
-        capability.CanDebug.Should().BeFalse();
-        capability.Reason.Should().Contain("not implemented");
-        capability.Reason.Should().NotContain("MonoVM");
+        capability.CanDebug.Should().BeTrue();
+        capability.Reason.Should().BeEmpty();
     }
 
     [Fact]
-    public void The_two_android_refusals_give_different_reasons()
+    public void The_android_runtime_version_is_the_whole_of_the_android_rule()
     {
-        // The whole point of the split: one says "your runtime cannot be
-        // debugged", the other "we have not written it yet".
-        var ten = LaunchCapability.Debugging(ProjectTargeting("net10.0-android36.1")).Reason;
-        var eleven = LaunchCapability.Debugging(ProjectTargeting("net11.0-android37.0")).Reason;
+        //Act — the same project shape either side of the CoreCLR boundary
+        var ten = LaunchCapability.Debugging(ProjectTargeting("net10.0-android36.1"));
+        var eleven = LaunchCapability.Debugging(ProjectTargeting("net11.0-android37.0"));
 
-        ten.Should().NotBe(eleven);
+        //Assert — one refusal is left, and it is about the RUNTIME
+        ten.CanDebug.Should().BeFalse();
+        ten.Reason.Should().Contain("MonoVM");
+        eleven.CanDebug.Should().BeTrue();
+        eleven.Reason.Should().NotBe(ten.Reason);
     }
 
     [Fact]

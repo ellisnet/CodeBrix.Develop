@@ -18,6 +18,7 @@ Built on:
 - **CodeBrix.Develop.UI** — GTK 4 + GtkSourceView 5 bindings for .NET 10
 - **Microsoft.CodeAnalysis (Roslyn)** — C# language services (workspaces, completion)
 - **CodeBrix.Develop.Debug.LinuxX64** / **CodeBrix.Develop.Debug.LinuxArm64** — the NetCoreDbg debugger engine; the app references whichever matches the host architecture
+- **CodeBrix.Develop.Debug.AndroidArm64** / **CodeBrix.Develop.Debug.AndroidX64** — the same debugger built to run on an Android device, for debugging .NET 11 (CoreCLR) Android apps; the app references both and pushes the one matching the device's ABI
 
 Code adapted from MonoDevelop retains its MIT/X11 license headers and carries
 a `//was previously:` note on the namespace line. See THIRD-PARTY-NOTICES.txt.

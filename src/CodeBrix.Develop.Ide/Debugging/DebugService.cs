@@ -30,6 +30,42 @@ public static class DebugService
     /// <summary>The in-memory breakpoints (session-only; cleared when the solution closes).</summary>
     public static BreakpointStore Breakpoints { get; } = new BreakpointStore();
 
+    static bool breakOnAllExceptions;
+
+    /// <summary>
+    /// Whether every thrown exception stops the debuggee at its throw site,
+    /// before any catch runs. Applied to the running session the moment it
+    /// changes, and to every session as it starts, so it can be turned on
+    /// before or during a session alike.
+    /// </summary>
+    public static bool BreakOnAllExceptions
+    {
+        get => breakOnAllExceptions;
+        set
+        {
+            if (breakOnAllExceptions == value)
+                return;
+            breakOnAllExceptions = value;
+            if (session is { } activeSession)
+                _ = PushExceptionBreakpointsAsync(activeSession);
+        }
+    }
+
+    static IReadOnlyList<string> ExceptionFilters =>
+        breakOnAllExceptions ? new[] { DebugSession.AllExceptionsFilter } : Array.Empty<string>();
+
+    static async Task PushExceptionBreakpointsAsync(DebugSession activeSession)
+    {
+        try
+        {
+            await activeSession.SetExceptionBreakpointsAsync(ExceptionFilters).ConfigureAwait(false);
+        }
+        catch (Exception ex)
+        {
+            LoggingService.LogWarning($"Exception breakpoint update failed: {ex.Message}");
+        }
+    }
+
     /// <summary>Whether a debug session is running.</summary>
     public static bool IsSessionActive => session != null;
 
@@ -114,6 +150,26 @@ public static class DebugService
         Attach(newSession);
     }
 
+    /// <summary>
+    /// Attaches a session to a debug adapter that is already running AND
+    /// already has a process to attach to — the Android path, where the
+    /// adapter runs on the device inside the app's sandbox and the app was
+    /// started by Android rather than by the debugger.
+    /// <paramref name="attachTimeout"/> bounds the DAP configurationDone
+    /// request, inside which the real attach happens (several seconds on a
+    /// phone). The breakpoints are the current ones, and stay local: the
+    /// deployed PDBs carry this machine's source paths. The session owns the
+    /// transport and disposes it when it ends.
+    /// </summary>
+    public static async Task StartAttachedAsync(IDebuggerTransport transport, int processId, TimeSpan attachTimeout)
+    {
+        RequireNoActiveSession();
+
+        var newSession = await DebugSession.AttachAsync(
+            transport, processId, BreakpointsByFile(), attachTimeout).ConfigureAwait(false);
+        Attach(newSession);
+    }
+
     static void RequireNoActiveSession()
     {
         lock (gate)
@@ -151,6 +207,11 @@ public static class DebugService
 
         lock (gate)
             session = newSession;
+
+        // The filters are session state on the adapter's side, so a session
+        // that starts with the toggle on is told straight away.
+        if (breakOnAllExceptions)
+            _ = PushExceptionBreakpointsAsync(newSession);
     }
 
     static async Task OnStoppedAsync(DebugSession stoppedSession, string reason)
@@ -189,7 +250,18 @@ public static class DebugService
     }
 
     /// <summary>Stops the session, terminating the debuggee.</summary>
-    public static Task StopAsync() => session?.StopAsync() ?? Task.CompletedTask;
+    public static Task StopAsync() => StopAsync(terminateDebuggee: true);
+
+    /// <summary>
+    /// Stops the session, either terminating the debuggee or detaching from
+    /// it and leaving it running. An Android session detaches: the debugger
+    /// runs in the app's own sandbox, where Android's SELinux policy forbids
+    /// it from signalling the app, so a terminate would only wait out its
+    /// timeout — the app is stopped afterwards with the activity manager,
+    /// which is allowed to.
+    /// </summary>
+    public static Task StopAsync(bool terminateDebuggee) =>
+        session?.StopAsync(terminateDebuggee) ?? Task.CompletedTask;
 
     /// <summary>
     /// Kills the session synchronously (application shutdown or solution

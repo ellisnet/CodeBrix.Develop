@@ -31,4 +31,17 @@
     <PackageReference Include="CodeBrix.Develop.Debug.LinuxArm64" Version="3.0.250.100" />
   </ItemGroup>
 
+  <!--
+    The on-device debugger for Android apps (.NET 11 CoreCLR), one package per
+    device ABI. Unlike the Linux pair these land in SEPARATE output folders
+    (netcoredbg-android-arm64/ and netcoredbg-android-x64/), so both are
+    referenced unconditionally and the device's ro.product.cpu.abi picks one at
+    run time (AndroidDebugger.PayloadFolderName). Nothing runs on this machine:
+    the payload is pushed into the debugged app's sandbox with adb.
+  -->
+  <ItemGroup>
+    <PackageReference Include="CodeBrix.Develop.Debug.AndroidArm64" Version="3.0.250.1243" />
+    <PackageReference Include="CodeBrix.Develop.Debug.AndroidX64" Version="3.0.250.1243" />
+  </ItemGroup>
+
 </Project>

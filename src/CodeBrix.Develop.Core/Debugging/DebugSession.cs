@@ -50,7 +50,9 @@ public class EvaluationResult
 /// same session semantics serve a debugger running locally as a child process
 /// and one running on a device at the far end of an SSH channel. Create with
 /// <see cref="LaunchAsync(string,string,string,IReadOnlyDictionary{string,IReadOnlyList{int}},IReadOnlyList{string},IReadOnlyDictionary{string,string},CancellationToken)"/>
-/// (local) or its transport overload (remote).
+/// (local), its transport overload (remote), or <see cref="AttachAsync"/>
+/// when the program is already running and the adapter only has to attach to
+/// it (Android, where the app is started by Android itself).
 /// </summary>
 public class DebugSession : IDisposable
 {
@@ -180,6 +182,86 @@ public class DebugSession : IDisposable
         return session;
     }
 
+    /// <summary>
+    /// Starts a session against a debug adapter that is already running and
+    /// already has a process to attach to, and returns once the attach has
+    /// completed. This is the Android path: the adapter runs on the device
+    /// inside the app's own sandbox, and the app it attaches to was started
+    /// by Android, not by the debugger.
+    /// <para>
+    /// The order is the attach counterpart of
+    /// <see cref="LaunchAsync(IDebuggerTransport,string,string,IReadOnlyDictionary{string,IReadOnlyList{int}},IReadOnlyList{string},IReadOnlyDictionary{string,string},CancellationToken)"/>:
+    /// initialize, then the attach request concurrently (its response only
+    /// arrives once configuration is done), wait for "initialized", apply the
+    /// breakpoints, and finish with configurationDone. The REAL attach — the
+    /// runtime handshake with the debuggee — happens inside that last request,
+    /// which is why it is given <paramref name="attachTimeout"/> of its own
+    /// rather than the seconds a configuration step would otherwise need.
+    /// </para>
+    /// The breakpoint paths are local: the deployed PDBs carry the build
+    /// machine's source paths, so the two match without any mapping. The
+    /// session owns <paramref name="transport"/> and disposes it.
+    /// </summary>
+    public static async Task<DebugSession> AttachAsync(IDebuggerTransport transport, int processId,
+        IReadOnlyDictionary<string, IReadOnlyList<int>> breakpointsByFile, TimeSpan attachTimeout,
+        CancellationToken cancellationToken = default)
+    {
+        if (transport == null)
+            throw new ArgumentNullException(nameof(transport));
+        if (processId <= 0)
+            throw new ArgumentOutOfRangeException(nameof(processId), "The process to attach to must be a real process id.");
+
+        var session = new DebugSession { transport = transport };
+        session.client = new DapClient(transport.Input, transport.Output);
+        var initialized = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
+        session.client.EventReceived += (eventName, body) => session.OnEvent(eventName, body, initialized);
+        session.client.ConnectionClosed += () => session.OnConnectionClosed();
+        session.client.Start();
+
+        try
+        {
+            await session.client.SendRequestAsync("initialize", new
+            {
+                clientID = "codebrix-develop",
+                clientName = "CodeBrix Develop",
+                adapterID = "coreclr",
+                linesStartAt1 = true,
+                columnsStartAt1 = true,
+                pathFormat = "path",
+                locale = "en-US",
+            }, cancellationToken).ConfigureAwait(false);
+
+            // Like launch, the attach response only arrives after
+            // configurationDone, so the request runs concurrently.
+            var attachTask = session.client.SendRequestAsync("attach", new Dictionary<string, object>
+            {
+                ["name"] = ".NET Core Attach",
+                ["type"] = "coreclr",
+                ["request"] = "attach",
+                ["processId"] = processId,
+                ["justMyCode"] = true,
+            }, cancellationToken);
+
+            await initialized.Task.WaitAsync(TimeSpan.FromSeconds(30), cancellationToken).ConfigureAwait(false);
+
+            foreach (var pair in breakpointsByFile)
+                await session.SetBreakpointsAsync(pair.Key, pair.Value, cancellationToken).ConfigureAwait(false);
+
+            using (var configuration = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken))
+            {
+                configuration.CancelAfter(attachTimeout);
+                await session.client.SendRequestAsync("configurationDone", null, configuration.Token).ConfigureAwait(false);
+            }
+            await attachTask.ConfigureAwait(false);
+        }
+        catch
+        {
+            session.Dispose();
+            throw;
+        }
+        return session;
+    }
+
     void OnEvent(string eventName, JsonElement body, TaskCompletionSource<bool> initialized)
     {
         switch (eventName)
@@ -227,6 +309,33 @@ public class DebugSession : IDisposable
         if (Interlocked.Exchange(ref sessionEndedRaised, 1) == 0)
             SessionEnded?.Invoke(exitCode);
     }
+
+    /// <summary>
+    /// The exception filter that stops the debuggee at EVERY throw site, before
+    /// any catch runs (a "first-chance" stop). One of the two filters the
+    /// adapter defines; the other is <see cref="UserUnhandledExceptionsFilter"/>.
+    /// </summary>
+    public const string AllExceptionsFilter = "all";
+
+    /// <summary>
+    /// The exception filter that stops only for exceptions user code does not
+    /// handle.
+    /// </summary>
+    public const string UserUnhandledExceptionsFilter = "user-unhandled";
+
+    /// <summary>
+    /// Replaces the exception breakpoints: which thrown exceptions stop the
+    /// debuggee. An empty list means none. Accepted at any point of the
+    /// session, before or after the debuggee is running.
+    /// </summary>
+    /// <param name="filters">The filter names, e.g. <see cref="AllExceptionsFilter"/>; null or empty clears them.</param>
+    /// <param name="cancellationToken">Cancels the request.</param>
+    /// <returns>Completes when the adapter has applied the filters.</returns>
+    public Task SetExceptionBreakpointsAsync(IReadOnlyList<string> filters, CancellationToken cancellationToken = default) =>
+        client.SendRequestAsync("setExceptionBreakpoints", new
+        {
+            filters = filters ?? Array.Empty<string>(),
+        }, cancellationToken);
 
     /// <summary>Replaces the breakpoints of one file (1-based lines).</summary>
     public Task SetBreakpointsAsync(string file, IReadOnlyList<int> lines, CancellationToken cancellationToken = default) =>
@@ -311,11 +420,23 @@ public class DebugSession : IDisposable
         client.SendRequestAsync("pause", new { threadId = 0 }, cancellationToken);
 
     /// <summary>Stops debugging, terminating the debuggee.</summary>
-    public async Task StopAsync()
+    public Task StopAsync() => StopAsync(terminateDebuggee: true);
+
+    /// <summary>
+    /// Ends the session, either killing the debuggee or leaving it running.
+    /// <para>
+    /// Terminating is what Stop means for a program the IDE started, and is
+    /// the default. Detaching (<paramref name="terminateDebuggee"/> false) is
+    /// for a debuggee that was NOT started by the debugger and should outlive
+    /// it — an app already running on a phone, say — where killing it would
+    /// be a surprise rather than a stop.
+    /// </para>
+    /// </summary>
+    public async Task StopAsync(bool terminateDebuggee)
     {
         try
         {
-            await client.SendRequestAsync("disconnect", new { terminateDebuggee = true },
+            await client.SendRequestAsync("disconnect", new { terminateDebuggee },
                 new CancellationTokenSource(TimeSpan.FromSeconds(5)).Token).ConfigureAwait(false);
         }
         catch (Exception)

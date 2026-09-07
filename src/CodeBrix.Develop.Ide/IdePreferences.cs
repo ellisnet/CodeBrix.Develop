@@ -101,6 +101,15 @@ public static class IdePreferences
         ConfigurationProperty.Create("CodeBrix.Develop.Ide.AndroidDeviceSerial", "");
 
     /// <summary>
+    /// Whether debug sessions stop at every thrown exception (first chance),
+    /// before any catch runs. Off by default: a framework that throws and
+    /// catches internally would otherwise interrupt constantly. Remembered
+    /// across sessions because it is a way of working, not a per-run choice.
+    /// </summary>
+    public static readonly ConfigurationProperty<bool> BreakOnAllExceptions =
+        ConfigurationProperty.Create("CodeBrix.Develop.Ide.BreakOnAllExceptions", false);
+
+    /// <summary>
     /// The full path of the last solution the user worked on, reopened on
     /// the next start; "" when no solution was open when the application
     /// closed (the next start then shows the New Application experience).

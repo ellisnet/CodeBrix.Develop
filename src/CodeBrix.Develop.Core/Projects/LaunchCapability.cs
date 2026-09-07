@@ -40,9 +40,10 @@ public sealed class DebugCapability
 /// What the IDE can do with a project, decided from its target framework.
 /// </summary>
 /// <remarks>
-/// THE ONE PLACE that decides whether Debug is offered. When Android debugging
-/// is implemented, the Android arm below changes here and the toolbar, the
-/// menu and the keyboard shortcut all follow — there is nothing else to find.
+/// THE ONE PLACE that decides whether Debug is offered: the toolbar, the menu
+/// and the keyboard shortcut all follow what this says, and there is nothing
+/// else to find. The Android arm below is now a version test and nothing more
+/// — .NET 11 and later can be debugged on a device, earlier versions cannot.
 /// </remarks>
 public static class LaunchCapability
 {
@@ -76,12 +77,11 @@ public static class LaunchCapability
                 + "debugger cannot attach to. Target .NET "
                 + $"{FirstCoreClrAndroidDotNetVersion}.0 or later for a debuggable Android app.");
 
-        // .NET 11 and later: the app runs on CoreCLR and exposes the .NET
-        // diagnostics channel, which is the transport a debugger would use.
-        // The transport is verified; the debugger that drives it is not
-        // written yet, so the honest answer is still no.
-        return DebugCapability.No(
-            "Debugging Android apps is not implemented yet. The app runs on CoreCLR and its "
-            + "diagnostics channel is reachable, but the IDE has no debugger for it.");
+        // .NET 11 and later: the app runs on CoreCLR, and the IDE debugs it
+        // with its own debugger placed inside the app's sandbox on the device
+        // and driven over DAP through an adb port forward. Everything a local
+        // session offers works: breakpoints, stepping, the call stack and
+        // hover evaluation.
+        return DebugCapability.Supported;
     }
 }

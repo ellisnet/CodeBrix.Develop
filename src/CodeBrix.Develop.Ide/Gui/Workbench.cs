@@ -22,6 +22,7 @@ using CodeBrix.Develop.Core.Testing;
 using CodeBrix.Develop.Core.TypeSystem;
 using CodeBrix.Develop.Emulation.FrameBuffer;
 using CodeBrix.Develop.Emulation.FrameBuffer.Transport;
+using CodeBrix.Develop.Ide.Android;
 using CodeBrix.Develop.Ide.Debugging;
 using CodeBrix.Develop.Ide.Gui.Dialogs;
 using CodeBrix.Develop.Ide.Gui.Documents;
@@ -30,6 +31,7 @@ using CodeBrix.Develop.Ide.Gui.Pads;
 using CodeBrix.Develop.Ide.Remote;
 using CodeBrix.Develop.Ide.Themes;
 using Gio = CodeBrix.Develop.UI.Gio;
+using GLib = CodeBrix.Develop.UI.GLib;
 using GObject = CodeBrix.Develop.UI.GObject;
 using Gtk = CodeBrix.Develop.UI.Gtk;
 
@@ -98,6 +100,11 @@ public class Workbench
     string? runningAndroidApplicationId;
     string? runningAndroidDeviceSerial;
 
+    // The device side of a running Android DEBUG session: the on-device
+    // debugger, the adb port forward and the persistent debug-app marking all
+    // outlive the DAP session, so the session end has to undo them explicitly.
+    AndroidDebugSession? androidDebugSession;
+
     // Which .NET SDK builds which project. Probing runs "dotnet --list-sdks"
     // per installation, so the locator is built once and rebuilt only when the
     // configured roots change.
@@ -139,6 +146,7 @@ public class Workbench
 
     Gio.SimpleAction? buildAction, rebuildAction, cleanAction, runAction, stopAction, closeSolutionAction;
     Gio.SimpleAction? debugAction, stepOverAction, stepIntoAction, stepOutAction;
+    Gio.SimpleAction? breakOnExceptionsAction;
 
     // Held so the Debug button's tooltip can explain WHY it is disabled; a
     // greyed-out button with no reason reads as a broken IDE.
@@ -499,6 +507,23 @@ public class Workbench
         stepOverAction = AddAction("step-over", () => _ = DebugService.StepOverAsync(), "F10", enabled: false);
         stepIntoAction = AddAction("step-into", () => _ = DebugService.StepIntoAsync(), "F11", enabled: false);
         stepOutAction = AddAction("step-out", () => _ = DebugService.StepOutAsync(), "<Shift>F11", enabled: false);
+        // A stateful (boolean) action renders as a check item in the menu.
+        // The preference is the source of truth: it seeds the check, the
+        // debug service, and every later session.
+        DebugService.BreakOnAllExceptions = IdePreferences.BreakOnAllExceptions.Value;
+        breakOnExceptionsAction = Gio.SimpleAction.NewStateful("break-on-exceptions", null,
+            GLib.Variant.NewBoolean(IdePreferences.BreakOnAllExceptions.Value));
+        breakOnExceptionsAction.OnActivate += (action, _) =>
+        {
+            var on = !(action.GetState()?.GetBoolean() ?? false);
+            action.SetState(GLib.Variant.NewBoolean(on));
+            IdePreferences.BreakOnAllExceptions.Value = on;
+            DebugService.BreakOnAllExceptions = on;
+            ShowStatus(on
+                ? "Breaking on all exceptions — the debuggee stops at every throw, before any catch"
+                : "Not breaking on exceptions");
+        };
+        application.AddAction(breakOnExceptionsAction);
         stopAction = AddAction("stop", StopRunOrDebug, "<Shift>F5", enabled: false);
         AddAction("toggle-breakpoint", () => documentManager.ActiveDocument?.ToggleBreakpointAtCaret(), "F9");
 
@@ -589,6 +614,7 @@ public class Workbench
         runMenu.Append("Step _Into", "app.step-into");
         runMenu.Append("Step O_ut", "app.step-out");
         runMenu.Append("Toggle _Breakpoint", "app.toggle-breakpoint");
+        runMenu.Append("Break on _All Exceptions", "app.break-on-exceptions");
         runMenu.Append("S_top", "app.stop");
 
         var testMenu = Gio.Menu.New();
@@ -1334,7 +1360,13 @@ public class Workbench
     void StopRunOrDebug()
     {
         if (DebugService.IsSessionActive)
-            _ = DebugService.StopAsync();
+        {
+            // An Android session detaches rather than terminates: the on-device
+            // debugger cannot signal the app (SELinux), so terminating would
+            // only wait out a timeout. The session-end cleanup force-stops the
+            // app through the activity manager instead.
+            _ = DebugService.StopAsync(terminateDebuggee: androidDebugSession == null);
+        }
         else if (TestService.IsRunning)
             testRunCancellation?.Cancel();
         else if (runningDeviceApp is { } deviceApp)
@@ -2085,6 +2117,12 @@ public class Workbench
             return;
         }
 
+        if (project.IsAndroidProject)
+        {
+            await DebugOnAndroidAsync(project);
+            return;
+        }
+
         documentManager.SaveAll();
         buildOutput.Clear();
         ShowBottomTab(buildOutput.Widget);
@@ -2108,6 +2146,67 @@ public class Workbench
         {
             LoggingService.LogError("Starting the debugger failed", ex);
             ShowStatus($"Debugging could not start: {ex.Message}");
+        }
+    }
+
+    // Build + install the app on the selected device in Debug, then run the
+    // Android debug pipeline against it. The build is here rather than in
+    // AndroidDebugLaunch because it needs the per-solution SDK: an Android
+    // app on .NET 11 is built by an SDK the system one cannot stand in for,
+    // and BuildService is what knows which.
+    async Task DebugOnAndroidAsync(DotNetProject project)
+    {
+        if (SelectedAndroidDevice is not { } device)
+        {
+            ShowStatus("No Android device — connect one or start an emulator");
+            return;
+        }
+        if (!EnsureSolutionSdkAvailable())
+            return;
+
+        documentManager.SaveAll();
+        buildOutput.Clear();
+        ShowBottomTab(buildOutput.Widget);
+        ShowStatus($"Building and installing {project.Name} on {device.DisplayName}…");
+        // Stop before the session exists cancels the build; once it is
+        // running, Stop goes to the debugger (StopRunOrDebug asks it first).
+        stopAction?.SetEnabled(true);
+        var cancellation = new CancellationTokenSource();
+        runCancellation = cancellation;
+        var started = false;
+        try
+        {
+            // -t:Install puts a Debug build on the chosen device (AdbTarget is
+            // one MSBuild property carrying adb's own "-s <serial>" pair).
+            var result = await buildService.BuildAsync(project.FileName, cancellation.Token,
+                "-c", "Debug", "-t:Install", $"-p:AdbTarget=-s {device.Serial}");
+            if (!result.Success)
+            {
+                ShowStatus("Build/install failed — debugging not started");
+                return;
+            }
+
+            applicationOutput.Clear();
+            ShowBottomTab(applicationOutput.Widget);
+            ShowStatus($"Debugging {project.Name} on {device.DisplayName}…");
+            androidDebugSession = await AndroidDebugLaunch.StartAsync(project, device.Serial,
+                line => uiContext.Post(_ => applicationOutput.AppendLine(line), null), cancellation.Token);
+            started = true;
+            stopAction?.SetEnabled(true);
+        }
+        catch (Exception ex)
+        {
+            LoggingService.LogError("Debugging on the Android device failed", ex);
+            applicationOutput.AppendLine($"Debugging on the device failed: {ex.Message}");
+            ShowStatus($"Debugging on the device failed: {ex.Message}");
+        }
+        finally
+        {
+            cancellation.Dispose();
+            if (ReferenceEquals(runCancellation, cancellation))
+                runCancellation = null;
+            if (!started)
+                DisableStopUnlessEmulating();
         }
     }
 
@@ -2150,6 +2249,7 @@ public class Workbench
     {
         CleanupFrameBufferSession();
         CleanupDeviceDebugSession();
+        CleanupAndroidDebugSession();
         OnDebugResumed();
         DisableStopUnlessEmulating();
         ShowStatus(exitCode is { } code ? $"Debugging ended — exit code {code}" : "Debugging ended");
@@ -2630,6 +2730,30 @@ public class Workbench
             catch (Exception ex)
             {
                 LoggingService.LogInfo($"Blanking the device screen after debugging: {ex.Message}");
+            }
+        });
+    }
+
+    // An Android debug session ended (the app exited, the user stopped it, or
+    // the debugger died). Unlike the DAP session, the device side does not
+    // clean itself up: the on-device debugger, the adb port forward and the
+    // persistent debug-app marking would all outlive the IDE. Not awaited —
+    // this runs on the session-ended path, and a phone takes seconds to
+    // answer — but every failure is logged by the cleanup itself.
+    void CleanupAndroidDebugSession()
+    {
+        if (androidDebugSession is not { } session)
+            return;
+        androidDebugSession = null;
+        _ = Task.Run(async () =>
+        {
+            try
+            {
+                await session.CleanupAsync();
+            }
+            catch (Exception ex)
+            {
+                LoggingService.LogInfo($"Cleaning up the Android debug session: {ex.Message}");
             }
         });
     }
