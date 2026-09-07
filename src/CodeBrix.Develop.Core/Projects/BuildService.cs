@@ -24,6 +24,33 @@ public class BuildService
     /// <summary>Raised for every line of build/run output, on a background thread.</summary>
     public event Action<string> OutputReceived;
 
+    /// <summary>
+    /// Chooses the .NET SDK for a build target, or null to use whatever
+    /// "dotnet" resolves to on PATH (the behaviour before any additional SDK
+    /// was configured). Set by the IDE; a project targeting a newer .NET than
+    /// the system SDK is built with the installation that can actually build
+    /// it, rather than failing with a misleading "target platform identifier
+    /// ... was not recognized".
+    /// </summary>
+    public Func<FilePath, DotNetSdkInstallation> SdkForTarget { get; set; }
+
+    /// <summary>
+    /// Applies the chosen SDK to a process: the executable to run, and
+    /// DOTNET_ROOT so a side-by-side installation resolves its own packs
+    /// instead of the system one's. Returns the command name for the echoed
+    /// command line.
+    /// </summary>
+    string ApplySdk(ProcessStartInfo startInfo, FilePath target)
+    {
+        var sdk = SdkForTarget?.Invoke(target);
+        if (sdk == null)
+            return "dotnet";
+        startInfo.FileName = sdk.DotnetPath;
+        if (sdk.Root.Length > 0)
+            startInfo.EnvironmentVariables["DOTNET_ROOT"] = sdk.Root;
+        return sdk.DotnetPath;
+    }
+
     /// <summary>Whether a build or run operation is currently in progress.</summary>
     public bool IsBusy { get; private set; }
 
@@ -75,6 +102,7 @@ public class BuildService
                 RedirectStandardError = true,
                 UseShellExecute = false,
             };
+            var command = ApplySdk(startInfo, target);
             startInfo.ArgumentList.Add(verb);
             startInfo.ArgumentList.Add(target);
             startInfo.ArgumentList.Add("-nologo");
@@ -82,7 +110,7 @@ public class BuildService
             foreach (var argument in extraArguments)
                 startInfo.ArgumentList.Add(argument);
 
-            OutputReceived?.Invoke($"dotnet {string.Join(' ', startInfo.ArgumentList)}");
+            OutputReceived?.Invoke($"{command} {string.Join(' ', startInfo.ArgumentList)}");
 
             // MSBuild repeats each diagnostic in the end-of-build summary;
             // key on location+code+message so each one is reported once.
@@ -139,6 +167,7 @@ public class BuildService
             RedirectStandardError = true,
             UseShellExecute = false,
         };
+        var command = ApplySdk(startInfo, project.FileName);
         startInfo.ArgumentList.Add("run");
         startInfo.ArgumentList.Add("--project");
         startInfo.ArgumentList.Add(project.FileName);
@@ -148,7 +177,7 @@ public class BuildService
                 startInfo.ArgumentList.Add(argument);
         }
 
-        OutputReceived?.Invoke($"dotnet {string.Join(' ', startInfo.ArgumentList)}");
+        OutputReceived?.Invoke($"{command} {string.Join(' ', startInfo.ArgumentList)}");
         var exitCode = await RunProcessAsync(startInfo, line => OutputReceived?.Invoke(line), cancellationToken).ConfigureAwait(false);
         OutputReceived?.Invoke($"The application exited with code {exitCode}.");
         return exitCode;

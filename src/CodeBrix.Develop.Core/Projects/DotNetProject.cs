@@ -107,6 +107,22 @@ public class DotNetProject
         => ProjectReferences.Any(reference => string.Equals(reference.FileName, projectFileName, StringComparison.OrdinalIgnoreCase));
 
     /// <summary>
+    /// The project's FIRST target framework, parsed, or null when it declares
+    /// none or declares one older than the "net5.0 and later" form. The first
+    /// is the one the IDE builds and launches, matching the
+    /// -property:TargetFramework it passes for a multi-targeted project.
+    /// </summary>
+    public TargetFrameworkMoniker TargetFramework
+        => TargetFrameworks.Count > 0 ? TargetFrameworkMoniker.Parse(TargetFrameworks[0]) : null;
+
+    /// <summary>
+    /// Every target framework the project declares, parsed; entries that do
+    /// not parse are dropped.
+    /// </summary>
+    public IReadOnlyList<TargetFrameworkMoniker> TargetFrameworkMonikers
+        => TargetFrameworks.Select(TargetFrameworkMoniker.Parse).Where(m => m != null).ToList();
+
+    /// <summary>
     /// Whether the project targets Android (a target framework such as
     /// "net10.0-android36.1"). An Android app is installed and started on a
     /// device rather than run locally, so Run and Stop both have to reach the

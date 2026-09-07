@@ -98,6 +98,12 @@ public class Workbench
     string? runningAndroidApplicationId;
     string? runningAndroidDeviceSerial;
 
+    // Which .NET SDK builds which project. Probing runs "dotnet --list-sdks"
+    // per installation, so the locator is built once and rebuilt only when the
+    // configured roots change.
+    DotNetSdkLocator? sdkLocator;
+    string sdkLocatorRoots = "";
+
     // The Android device section of the toolbar, shown only while an Android
     // project is the startup project. The monitor polls adb for as long as
     // that is true and is stopped the moment it stops being true.
@@ -133,6 +139,10 @@ public class Workbench
 
     Gio.SimpleAction? buildAction, rebuildAction, cleanAction, runAction, stopAction, closeSolutionAction;
     Gio.SimpleAction? debugAction, stepOverAction, stepIntoAction, stepOutAction;
+
+    // Held so the Debug button's tooltip can explain WHY it is disabled; a
+    // greyed-out button with no reason reads as a broken IDE.
+    Gtk.Button? debugButton;
     Gio.SimpleAction? updateCodeBrixPackagesAction, closeEmulatorAction, rotateEmulatorAction;
     Gio.SimpleAction? openSolutionFolderAction, openSolutionTerminalAction;
     // Tools > Device Orientation — enabled only while an app runs on the device.
@@ -168,6 +178,8 @@ public class Workbench
                 ShowStatus($"Startup project: {startup.Name}");
             // An Android startup project brings the device section with it.
             UpdateAndroidDeviceSection();
+            if (StartupDebugCapability() is { CanDebug: false } blocked)
+                ShowStatus(blocked.Reason);
         };
 
         testsPad = new TestsPad();
@@ -199,6 +211,10 @@ public class Workbench
         bottomNotebook.AppendPage(ideLog.Widget, Gtk.Label.New("IDE Log"));
         bottomNotebook.SetVexpand(false);
 
+        // Every project is built and run with an SDK that can actually build
+        // its target framework, not simply whatever is first on PATH.
+        buildService.SdkForTarget = ResolveSdkForTarget;
+        runService.SdkForTarget = ResolveSdkForTarget;
         buildService.OutputReceived += line => uiContext.Post(_ => buildOutput.AppendLine(line), null);
         runService.OutputReceived += line => uiContext.Post(_ => applicationOutput.AppendLine(line), null);
         AndroidDebugBridge.OutputReceived += line => uiContext.Post(_ => applicationOutput.AppendLine(line), null);
@@ -354,7 +370,8 @@ public class Workbench
         // The debugging group. Debug leads it because the button is also
         // Continue while paused, which is the command the three stepping
         // buttons hand control back and forth with.
-        toolbar.Append(ToolButton("bug-16", "app.debug", "Start Debugging / Continue (F5)"));
+        debugButton = ToolButton("bug-16", "app.debug", "Start Debugging / Continue (F5)");
+        toolbar.Append(debugButton);
         toolbar.Append(ToolButton("step-over-16", "app.step-over", "Step Over (F10)"));
         toolbar.Append(ToolButton("step-in-16", "app.step-into", "Step Into (F11)"));
         toolbar.Append(ToolButton("step-out-16", "app.step-out", "Step Out (Shift+F11)"));
@@ -697,6 +714,12 @@ public class Workbench
         IdePreferences.LastSolution.Value = (string) fileName.FullPath;
         ShowStatus($"Solution '{solution.Name}' loaded ({solution.Projects.Count} project{(solution.Projects.Count == 1 ? "" : "s")}) — loading type system…");
 
+        // Point the type system at the SDK THIS solution needs, before the
+        // workspace is built. Re-evaluated on every solution open, so moving
+        // between a .NET 10 solution and a .NET 11 one needs no restart.
+        if (!PrepareTypeSystemSdk(solution))
+            return; // the status line already says why
+
         try
         {
             await TypeSystemService.LoadSolutionAsync(solution, new Progress<string>(ShowStatus));
@@ -1020,6 +1043,8 @@ public class Workbench
     {
         if (IdeApp.CurrentSolution is not { } solution || buildService.IsBusy)
             return;
+        if (!EnsureSolutionSdkAvailable())
+            return;
         documentManager.SaveAll();
         buildOutput.Clear();
         ShowBottomTab(buildOutput.Widget);
@@ -1244,6 +1269,8 @@ public class Workbench
         if (DebugService.IsSessionActive || buildService.IsBusy || TestService.IsRunning)
             return;
         documentManager.SaveAll();
+        if (!EnsureSolutionSdkAvailable())
+            return;
         buildOutput.Clear();
         ShowBottomTab(buildOutput.Widget);
         ShowStatus($"Building {node.Project.Name}…");
@@ -1275,6 +1302,8 @@ public class Workbench
     async Task CleanAsync()
     {
         if (IdeApp.CurrentSolution is not { } solution || buildService.IsBusy)
+            return;
+        if (!EnsureSolutionSdkAvailable())
             return;
         buildOutput.Clear();
         ShowBottomTab(buildOutput.Widget);
@@ -1584,6 +1613,157 @@ public class Workbench
         ShowStatus("Frame Buffer emulator closed");
     }
 
+    /// <summary>
+    /// Chooses the SDK the type system should load this solution with: the
+    /// one that can serve the HIGHEST .NET version among its projects, since
+    /// that installation's targeting packs are the ones the newest projects
+    /// need. Older projects in the same solution are served by the same packs
+    /// only if that installation has them — a solution genuinely mixing .NET
+    /// versions across installations cannot be fully loaded at once, and the
+    /// newest wins because that is where the work is.
+    /// </summary>
+    bool PrepareTypeSystemSdk(Solution solution)
+    {
+        var highest = RequiredFrameworkVersion(solution);
+
+        var locator = SdkLocator;
+        var allowPreview = IdePreferences.AllowPreviewMSBuild.Value;
+
+        // Refused rather than mis-loaded: without this the solution would load
+        // against an SDK that cannot see its targeting packs, and the editor
+        // would fill with hundreds of errors that are not in the code.
+        // Refuse whenever NOTHING can serve the solution — whether because
+        // previews are switched off, or because the SDK that would serve it was
+        // never pointed at. Falling through to the system SDK loads the
+        // solution against packs it does not have and fills the editor with
+        // hundreds of errors that are not in the code.
+        if (highest != null && locator.Resolve(highest, allowPreview) == null)
+        {
+            ReportMissingSdk(highest, "Cannot load this solution");
+            return false;
+        }
+
+        var solutionSdk = locator.Resolve(highest, allowPreview) ?? locator.NewestFor(allowPreview);
+        TypeSystemService.UseSdk(solutionSdk, locator.NewestFor(allowPreview));
+
+        if (solutionSdk != null && !solutionSdk.IsSystemInstallation)
+            ShowStatus($"Type system using the .NET SDK at {solutionSdk.Root}");
+        return true;
+    }
+
+    /// <summary>
+    /// The SDK locator for the configured roots, rebuilt when they change.
+    /// </summary>
+    DotNetSdkLocator SdkLocator
+    {
+        get
+        {
+            var configured = IdePreferences.AdditionalDotnetSdkRoots.Value ?? "";
+            if (sdkLocator == null || !string.Equals(configured, sdkLocatorRoots, StringComparison.Ordinal))
+            {
+                sdkLocator = new DotNetSdkLocator(
+                    configured.Split(';', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries));
+                sdkLocatorRoots = configured;
+            }
+            return sdkLocator;
+        }
+    }
+
+    /// <summary>
+    /// Picks the SDK for a build target. Returns null — meaning "whatever
+    /// dotnet is on PATH" — for anything not recognized as a loaded project,
+    /// which is exactly the behaviour that existed before.
+    /// </summary>
+    DotNetSdkInstallation? ResolveSdkForTarget(FilePath target)
+    {
+        if (IdeApp.CurrentSolution is not { } solution)
+            return null;
+
+        var version = RequiredFrameworkVersion(solution);
+        return version == null ? null : SdkLocator.Resolve(version, IdePreferences.AllowPreviewMSBuild.Value);
+    }
+
+    /// <summary>
+    /// Whether an SDK exists for the current solution, reporting clearly when
+    /// not. Called BEFORE any build starts.
+    /// </summary>
+    /// <remarks>
+    /// Without this the build ran anyway with whatever "dotnet" is on PATH and
+    /// died with the SDK's own "NETSDK1139: The target platform identifier
+    /// android was not recognized" — which blames the platform and says
+    /// nothing about the real cause. Refusing up front, with the reason, is
+    /// the difference between a five-second fix and an hour of confusion.
+    /// </remarks>
+    bool EnsureSolutionSdkAvailable()
+    {
+        if (IdeApp.CurrentSolution is not { } solution)
+            return true;
+        var version = RequiredFrameworkVersion(solution);
+        if (version == null || SdkLocator.Resolve(version, IdePreferences.AllowPreviewMSBuild.Value) != null)
+            return true;
+
+        ReportMissingSdk(version, "Cannot build");
+        return false;
+    }
+
+    /// <summary>
+    /// Explains, durably, why no SDK could be found for a solution. The status
+    /// line alone is not enough: the Android device poll overwrites it within a
+    /// second, and this may be the only account the user gets of why nothing
+    /// works.
+    /// </summary>
+    void ReportMissingSdk(Version version, string headline)
+    {
+        var wanted = version.ToString(2);
+        string message;
+        if (SdkLocator.NeedsPrerelease(version))
+        {
+            message = $"This solution needs .NET {wanted}, which only a PREVIEW SDK can provide. "
+                + "Turn on \"Allow preview MSBuild\" under File > Options > General.";
+        }
+        else if (string.IsNullOrWhiteSpace(IdePreferences.AdditionalDotnetSdkRoots.Value))
+        {
+            // The overwhelmingly likely case, and the one that actually
+            // happened: the preview SDK is installed, previews are allowed, but
+            // the IDE was never told WHERE it is. Both settings are needed;
+            // allowing previews without naming a folder does nothing at all.
+            message = $"This solution needs .NET {wanted}, and no .NET SDK on this machine "
+                + "provides it.\n"
+                + "If you have one installed outside the system location, put its folder in "
+                + "\"Additional SDK installation folders\" under File > Options > General — for "
+                + "example /home/you/dotnet11.\n"
+                + "That field is currently EMPTY (the grey text in it is only an example).";
+        }
+        else
+        {
+            message = $"This solution needs .NET {wanted}, which none of the configured .NET SDKs "
+                + $"provide (system, plus: {IdePreferences.AdditionalDotnetSdkRoots.Value}).";
+        }
+
+        buildOutput.Clear();
+        buildOutput.AppendLine(message);
+        ShowBottomTab(buildOutput.Widget);
+        ShowStatus($"{headline} — see the Build output.");
+        LoggingService.LogWarning(message.Replace("\n", " "));
+    }
+
+    /// <summary>
+    /// The .NET version a solution needs: the HIGHEST among its projects.
+    /// </summary>
+    /// <remarks>
+    /// Solution-wide on purpose, whether the command targets one project or
+    /// all of them. If ANY project wants .NET 11 then it is a .NET 11 solution
+    /// and every part of it uses that SDK — a newer SDK builds older projects
+    /// perfectly well, whereas mixing SDKs within one solution would let the
+    /// type system and the build disagree about the very same project.
+    /// </remarks>
+    static Version? RequiredFrameworkVersion(Solution solution)
+        => solution.Projects
+            .Select(p => p.TargetFramework?.FrameworkVersion)
+            .Where(v => v != null)
+            .DefaultIfEmpty(null)
+            .Max();
+
     // ---- Android device section -------------------------------------------
 
     /// <summary>
@@ -1759,9 +1939,25 @@ public class Workbench
     // continue, because it is the only launch target that disables Run/Debug
     // while its application is up; every other head left the action enabled and
     // got Continue for free.
-    void UpdateDebugActionEnabled() =>
+    void UpdateDebugActionEnabled()
+    {
+        // Continue on a paused session is always available: the session that
+        // is already running is not subject to "can this project be started".
+        var capability = StartupDebugCapability();
         debugAction?.SetEnabled(DebugService.IsPaused
-            || (!frameBufferEmulationRunning && CanLaunchStartupProject()));
+            || (!frameBufferEmulationRunning && CanLaunchStartupProject() && capability.CanDebug));
+        debugButton?.SetTooltipText(capability.CanDebug
+            ? "Start Debugging / Continue (F5)"
+            : capability.Reason);
+    }
+
+    // Why the startup project can or cannot be debugged. Decided in one place
+    // in Core (LaunchCapability) so the toolbar, the tooltip and the status
+    // line can never disagree.
+    DebugCapability StartupDebugCapability()
+        => IdeApp.CurrentSolution is { } solution
+            ? LaunchCapability.Debugging(IdeApp.GetStartupProject(solution))
+            : DebugCapability.Supported;
 
     // The remembered emulator size, seeding the orientation-independent keys from
     // the width/height pair they replaced the first time an older stored size is
@@ -2009,6 +2205,8 @@ public class Workbench
             return;
         }
 
+        if (!EnsureSolutionSdkAvailable())
+            return;
         documentManager.SaveAll();
         applicationOutput.Clear();
         ShowBottomTab(applicationOutput.Widget);

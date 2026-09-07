@@ -33,15 +33,65 @@ public static class TypeSystemService
     static readonly SemaphoreSlim loadLock = new SemaphoreSlim(1, 1);
 
     /// <summary>
-    /// Locates the installed .NET SDK's MSBuild. Must run before any
-    /// Microsoft.Build assembly is loaded, i.e. at application startup.
+    /// Prepares the type system for a solution: points DOTNET_ROOT at the SDK
+    /// the solution needs, and registers MSBuild the first time.
     /// </summary>
-    public static void Initialize()
+    /// <param name="solutionSdk">
+    /// The SDK whose TARGETING PACKS the solution's projects need.
+    /// </param>
+    /// <param name="newestSdk">
+    /// The newest SDK installed, whose MSBuild is registered.
+    /// </param>
+    /// <remarks>
+    /// Two facts shape this, both established by measurement rather than
+    /// assumption:
+    /// <list type="bullet">
+    /// <item>DOTNET_ROOT is what decides which target frameworks can be
+    /// loaded, because targeting packs resolve from it and two SDK
+    /// installations have DISJOINT pack sets. It is re-read for each new
+    /// workspace, so it can change from one solution to the next.</item>
+    /// <item>MSBuild can be registered only ONCE per process. A second
+    /// attempt throws "MSBuild assemblies were already loaded", and
+    /// Unregister does not help because .NET cannot unload them. So the
+    /// NEWEST is registered, once, and it serves every solution — a newer
+    /// MSBuild evaluates an older solution perfectly well once DOTNET_ROOT
+    /// selects that solution's packs.</item>
+    /// </list>
+    /// Nothing is registered at application start: with no solution open there
+    /// is no way to know which SDK is wanted, and registering the wrong one is
+    /// unrecoverable for the life of the process.
+    /// </remarks>
+    public static void UseSdk(Projects.DotNetSdkInstallation solutionSdk,
+        Projects.DotNetSdkInstallation newestSdk)
     {
-        if (!MSBuildLocator.IsRegistered)
+        if (solutionSdk != null && solutionSdk.Root.Length > 0)
         {
-            var instance = MSBuildLocator.RegisterDefaults();
-            LoggingService.LogInfo($"Roslyn type system using MSBuild from {instance.Name} {instance.Version}");
+            Environment.SetEnvironmentVariable("DOTNET_ROOT", solutionSdk.Root);
+            LoggingService.LogInfo($"Roslyn type system using DOTNET_ROOT={solutionSdk.Root}");
+        }
+
+        if (MSBuildLocator.IsRegistered)
+            return;
+
+        var msbuildDirectory = newestSdk?.NewestSdkDirectory ?? "";
+        try
+        {
+            if (msbuildDirectory.Length > 0)
+            {
+                MSBuildLocator.RegisterMSBuildPath(msbuildDirectory);
+                LoggingService.LogInfo($"Roslyn type system using MSBuild from {msbuildDirectory}");
+            }
+            else
+            {
+                var instance = MSBuildLocator.RegisterDefaults();
+                LoggingService.LogInfo($"Roslyn type system using MSBuild from {instance.Name} {instance.Version}");
+            }
+        }
+        catch (Exception ex)
+        {
+            // Without MSBuild there is no workspace, but the editor still opens
+            // files — better a degraded IDE than none.
+            LoggingService.LogError("Could not register MSBuild for the type system", ex);
         }
     }
 

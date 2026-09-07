@@ -54,6 +54,43 @@ public static class IdePreferences
         ConfigurationProperty.Create(OptionsStore.AutoBackupRetentionKey, OptionsStore.DefaultAutoBackupRetention);
 
     /// <summary>
+    /// Whether the IDE may use a PREVIEW .NET SDK — and therefore register a
+    /// preview MSBuild. Off by default.
+    /// </summary>
+    /// <remarks>
+    /// MSBuild is registered ONCE per process and then serves every solution
+    /// opened afterwards, so allowing a preview is not a per-project decision:
+    /// it puts a preview MSBuild under stable work too. Off, the IDE registers
+    /// the newest STABLE SDK and refuses to load a solution that needs a
+    /// preview, saying so plainly, rather than loading it against the wrong SDK
+    /// and showing hundreds of phantom errors.
+    /// <para>
+    /// Expected to become unnecessary: when the next .NET ships a stable SDK,
+    /// it is simply the newest stable one and this setting stops mattering.
+    /// </para>
+    /// </remarks>
+    public static readonly ConfigurationProperty<bool> AllowPreviewMSBuild =
+        ConfigurationProperty.Create("CodeBrix.Develop.Ide.AllowPreviewMSBuild", false);
+
+    /// <summary>
+    /// Additional .NET SDK installation roots, separated by ";" — each the
+    /// folder that holds a "dotnet" executable, e.g. "/home/me/dotnet11".
+    /// Empty by default.
+    /// </summary>
+    /// <remarks>
+    /// A project targeting a newer .NET than the system SDK cannot be built by
+    /// it. Rather than fail with the SDK's misleading "target platform
+    /// identifier ... was not recognized", the IDE builds it with an
+    /// installation that can. These are CONFIGURED, not discovered: an SDK
+    /// deliberately kept outside the system tree — a preview, say, so it does
+    /// not become the default for every project on the machine — lives
+    /// wherever its owner put it. The system SDK is always used when it
+    /// qualifies, so this changes nothing for ordinary projects.
+    /// </remarks>
+    public static readonly ConfigurationProperty<string> AdditionalDotnetSdkRoots =
+        ConfigurationProperty.Create("CodeBrix.Develop.Ide.AdditionalDotnetSdkRoots", "");
+
+    /// <summary>
     /// The serial of the Android device the user picked in the toolbar, or ""
     /// while they never have. A DELIBERATE choice: it outranks "whatever was
     /// seen first" whenever that device is attached, and is ignored (without

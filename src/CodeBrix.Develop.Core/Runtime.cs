@@ -33,6 +33,10 @@ public static class Runtime
         initialized = true;
 
         LoggingService.LogInfo($"CodeBrix.Develop core runtime initializing (.NET {Environment.Version})");
-        TypeSystemService.Initialize();
+        // The type system is NOT initialized here. Which .NET SDK it must use
+        // is a property of the solution, and no solution is open yet; MSBuild
+        // can only be registered once per process, so registering a guess at
+        // startup would be unrecoverable. TypeSystemService.UseSdk runs when a
+        // solution is opened instead.
     }
 }
