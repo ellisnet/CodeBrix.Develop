@@ -107,6 +107,24 @@ public class DotNetProject
         => ProjectReferences.Any(reference => string.Equals(reference.FileName, projectFileName, StringComparison.OrdinalIgnoreCase));
 
     /// <summary>
+    /// Whether the project targets Android (a target framework such as
+    /// "net10.0-android36.1"). An Android app is installed and started on a
+    /// device rather than run locally, so Run and Stop both have to reach the
+    /// device — see <see cref="Android.AndroidDebugBridge"/>.
+    /// </summary>
+    public bool IsAndroidProject
+        => TargetFrameworks.Any(framework =>
+               framework.Contains("-android", StringComparison.OrdinalIgnoreCase));
+
+    /// <summary>
+    /// The Android application id (package name) the project installs as, or
+    /// "" when the project declares none. Read from the ApplicationId
+    /// property, falling back to the package attribute of a sibling
+    /// AndroidManifest.xml for projects written the older way.
+    /// </summary>
+    public string ApplicationId { get; private set; } = "";
+
+    /// <summary>
     /// Whether this is a test project the IDE can discover and run tests in:
     /// an xUnit.net v3 project, whose xunit.v3 package makes the build output
     /// a self-executing test binary.
@@ -159,6 +177,10 @@ public class DotNetProject
         else
             project.TargetFrameworks = Array.Empty<string>();
 
+        project.ApplicationId = GetProperty(properties, "ApplicationId")
+            ?? ReadManifestPackage(project.BaseDirectory)
+            ?? "";
+
         var linkedFiles = new List<LinkedProjectFile>();
         var declaredFolders = new List<string>();
         var packageReferences = new List<ProjectPackageReference>();
@@ -209,6 +231,30 @@ public class DotNetProject
 
     static string GetProperty(IEnumerable<XElement> properties, string name)
         => properties.FirstOrDefault(p => p.Name.LocalName == name)?.Value;
+
+    /// <summary>
+    /// The package name declared by a sibling AndroidManifest.xml, or null
+    /// when there is no manifest or it declares none. Current Android
+    /// projects set ApplicationId in the project file and leave the manifest's
+    /// package attribute off entirely; this covers the older shape.
+    /// </summary>
+    static string ReadManifestPackage(FilePath baseDirectory)
+    {
+        var manifest = baseDirectory.Combine("AndroidManifest.xml");
+        if (!File.Exists(manifest))
+            return null;
+        try
+        {
+            var package = XDocument.Load(manifest).Root?.Attribute("package")?.Value;
+            return string.IsNullOrWhiteSpace(package) ? null : package;
+        }
+        catch (Exception)
+        {
+            // A malformed manifest is the Android build's problem to report,
+            // not a reason to fail loading the project into the IDE.
+            return null;
+        }
+    }
 
     /// <summary>
     /// The path of the built executable (the Linux apphost) for the given

@@ -14,6 +14,7 @@ using System.Threading;
 using System.Threading.Tasks;
 using System.Collections.Generic;
 using CodeBrix.Develop.Core;
+using CodeBrix.Develop.Core.Android;
 using CodeBrix.Develop.Core.Debugging;
 using CodeBrix.Develop.Core.Projects;
 using CodeBrix.Develop.Core.Remote;
@@ -89,6 +90,32 @@ public class Workbench
     // The app currently running on the active FrameBuffer device, if any.
     RemoteApplication? runningDeviceApp;
 
+    // The Android app a run has started ON A DEVICE, if any: its application
+    // id and the device the Android targets chose. "dotnet run" does not own
+    // that app — it installs it, starts it and then follows logcat — so
+    // cancelling the local process would leave it running on the device.
+    // These are what let Stop reach it.
+    string? runningAndroidApplicationId;
+    string? runningAndroidDeviceSerial;
+
+    // The Android device section of the toolbar, shown only while an Android
+    // project is the startup project. The monitor polls adb for as long as
+    // that is true and is stopped the moment it stops being true.
+    Gtk.Box? androidDeviceSection;
+    Gtk.DropDown? androidDeviceDropDown;
+    Gtk.StringList? androidDeviceNames;
+    AndroidDeviceMonitor? androidDeviceMonitor;
+    IReadOnlyList<AndroidDevice> androidDevices = Array.Empty<AndroidDevice>();
+    // Set while the code is writing the drop-down's selection, so the
+    // resulting change notification is not mistaken for the user choosing.
+    bool settingAndroidSelection;
+
+    // What the device drop-down shows when adb sees nothing. The section
+    // itself stays visible: an Android startup project is the whole reason
+    // it is there, and hiding it whenever a phone is unplugged would make it
+    // flicker in and out for the one user who most needs to see it.
+    const string NoAndroidDevicesLabel = "no devices";
+
     // The device a debug session is running ON, while one is. Unlike a run,
     // the debugged app has no RemoteApplication handle — the debug adapter
     // owns it — so this is what tells the end-of-session cleanup that there
@@ -139,6 +166,8 @@ public class Workbench
         {
             if (IdeApp.GetStartupProject(IdeApp.CurrentSolution) is { } startup)
                 ShowStatus($"Startup project: {startup.Name}");
+            // An Android startup project brings the device section with it.
+            UpdateAndroidDeviceSection();
         };
 
         testsPad = new TestsPad();
@@ -172,6 +201,7 @@ public class Workbench
 
         buildService.OutputReceived += line => uiContext.Post(_ => buildOutput.AppendLine(line), null);
         runService.OutputReceived += line => uiContext.Post(_ => applicationOutput.AppendLine(line), null);
+        AndroidDebugBridge.OutputReceived += line => uiContext.Post(_ => applicationOutput.AppendLine(line), null);
         nugetService.OutputReceived += line => uiContext.Post(_ => nugetOutput.AppendLine(line), null);
         // The sink replays every line logged before the workbench existed
         // (core runtime init, options auto-backup, ...), then follows along.
@@ -347,7 +377,39 @@ public class Workbench
             "Open Solution Folder (Ctrl+Shift+O)"));
         toolbar.Append(ToolButton("pad-immediate-16", "app.open-solution-terminal",
             "Open Solution Terminal (Ctrl+`)"));
+        // Last, at the right-hand end: the Android device picker, which only
+        // exists at all while an Android project is the startup project.
+        toolbar.Append(BuildAndroidDeviceSection());
         return toolbar;
+    }
+
+    /// <summary>
+    /// The toolbar's Android section: the robot, and which device the app
+    /// will be deployed to. Hidden — and not polling — unless the startup
+    /// project targets Android.
+    /// </summary>
+    Gtk.Widget BuildAndroidDeviceSection()
+    {
+        androidDeviceSection = Gtk.Box.New(Gtk.Orientation.Horizontal, 4);
+        androidDeviceSection.Append(ToolbarGroupSpace());
+
+        var robot = ImageService.CreateImage("android-16");
+        robot.SetTooltipText("The startup project is an Android application");
+        androidDeviceSection.Append(robot);
+
+        androidDeviceNames = Gtk.StringList.New(Array.Empty<string>());
+        androidDeviceDropDown = Gtk.DropDown.New(androidDeviceNames, expression: null);
+        androidDeviceDropDown.SetTooltipText("The Android device to deploy to");
+        androidDeviceDropDown.OnNotify += (_, args) =>
+        {
+            if (args.Pspec.GetName() != "selected" || settingAndroidSelection)
+                return;
+            OnAndroidDeviceChosen();
+        };
+        androidDeviceSection.Append(androidDeviceDropDown);
+
+        androidDeviceSection.SetVisible(false);
+        return androidDeviceSection;
     }
 
     Gtk.Button ToolButton(string iconName, string actionName, string tooltip)
@@ -623,6 +685,9 @@ public class Workbench
                      openSolutionFolderAction, openSolutionTerminalAction })
             action?.SetEnabled(true);
         updateCodeBrixPackagesAction?.SetEnabled(solution.IsCodeBrixPlatformApplication);
+        // The startup project is known now, so the Android section can decide
+        // whether it belongs on screen — and Run/Debug whether they are usable.
+        UpdateAndroidDeviceSection();
         // The Tests pad fills from a fast syntax scan — no build needed.
         SetTestActionsEnabled(TestService.SolutionHasTests(solution));
         _ = TestService.RefreshAsync(solution);
@@ -1250,7 +1315,17 @@ public class Workbench
             ShowStatus("Stopping the app on the device…");
         }
         else if (runCancellation != null)
+        {
+            // An Android app runs ON A DEVICE and is not a child of the local
+            // "dotnet run", so it has to be stopped there as well as here —
+            // cancelling alone only ends the logcat tail on this machine and
+            // leaves the app running on the phone. The device call is not
+            // awaited: Stop must stay responsive, and the local process should
+            // be cancelled either way.
+            if (runningAndroidApplicationId is { } androidApplicationId)
+                _ = StopAndroidAppOnDeviceAsync(androidApplicationId, runningAndroidDeviceSerial);
             runCancellation.Cancel();
+        }
         else if (frameBufferEmulationRunning)
         {
             // The emulated application stops; its window stays exactly where
@@ -1509,14 +1584,171 @@ public class Workbench
         ShowStatus("Frame Buffer emulator closed");
     }
 
+    // ---- Android device section -------------------------------------------
+
+    /// <summary>
+    /// Brings the Android section into line with the current startup project:
+    /// shown and polling for an Android project, hidden and idle otherwise.
+    /// Called whenever the startup project might have changed.
+    /// </summary>
+    void UpdateAndroidDeviceSection()
+    {
+        var isAndroid = IdeApp.GetStartupProject(IdeApp.CurrentSolution) is { } startup
+            && startup.IsAndroidProject;
+
+        androidDeviceSection?.SetVisible(isAndroid);
+        if (isAndroid)
+            StartAndroidDeviceMonitor();
+        else
+            StopAndroidDeviceMonitor();
+        // Populate the drop-down NOW rather than waiting for the monitor to
+        // report a change: with nothing attached the first poll matches the
+        // empty starting state, so no change is ever raised and the control
+        // would sit there empty (GTK renders that as "(None)") instead of
+        // saying "no devices".
+        RefreshAndroidDeviceNames();
+        UpdateLaunchActionsEnabled();
+    }
+
+    void StartAndroidDeviceMonitor()
+    {
+        if (androidDeviceMonitor == null)
+        {
+            androidDeviceMonitor = new AndroidDeviceMonitor();
+            // Polling runs off the UI thread; GTK may only be touched on it.
+            androidDeviceMonitor.DevicesChanged += devices =>
+                uiContext.Post(_ => OnAndroidDevicesChanged(devices), null);
+        }
+        androidDeviceMonitor.Start();
+    }
+
+    void StopAndroidDeviceMonitor()
+    {
+        androidDeviceMonitor?.Stop();
+        if (androidDevices.Count == 0)
+            return;
+        androidDevices = Array.Empty<AndroidDevice>();
+        RefreshAndroidDeviceNames();
+    }
+
+    void OnAndroidDevicesChanged(IReadOnlyList<AndroidDevice> devices)
+    {
+        androidDevices = devices;
+        RefreshAndroidDeviceNames();
+        UpdateLaunchActionsEnabled();
+
+        var selected = SelectedAndroidDevice;
+        ShowStatus(selected != null
+            ? $"Android device: {selected.DisplayName}"
+            : devices.Count == 0
+                ? "No Android device — connect one or start an emulator"
+                : "No usable Android device (attached, but not ready)");
+    }
+
+    /// <summary>
+    /// Rebuilds the drop-down and re-applies the selection rule: the device
+    /// the user deliberately chose wins whenever it is attached, and the first
+    /// one seen is used otherwise.
+    /// </summary>
+    void RefreshAndroidDeviceNames()
+    {
+        if (androidDeviceNames == null || androidDeviceDropDown == null)
+            return;
+
+        settingAndroidSelection = true;
+        try
+        {
+            // With nothing attached the drop-down still says something: an
+            // empty control next to the robot reads as broken, where "no
+            // devices" reads as the true state of the world. It is a label,
+            // not a choice, so the control is insensitive while it shows.
+            var names = androidDevices.Count > 0
+                ? androidDevices.Select(device => device.DisplayName).ToArray()
+                : new[] { NoAndroidDevicesLabel };
+            androidDeviceNames.Splice(0, androidDeviceNames.GetNItems(), names);
+
+            var index = PreferredAndroidDeviceIndex();
+            androidDeviceDropDown.SetSelected(index < 0 ? 0 : (uint) index);
+            androidDeviceDropDown.SetSensitive(androidDevices.Count > 0);
+        }
+        finally
+        {
+            settingAndroidSelection = false;
+        }
+    }
+
+    // The rule itself lives in Core (and is tested there); this only supplies
+    // the remembered choice.
+    int PreferredAndroidDeviceIndex()
+        => AndroidDeviceSelection.PreferredIndex(androidDevices, IdePreferences.AndroidDeviceSerial.Value);
+
+    /// <summary>
+    /// The device the toolbar currently points at, or null when there is
+    /// none. Only a READY device counts: an unauthorized phone can be shown
+    /// and selected, but nothing can be deployed to it.
+    /// </summary>
+    AndroidDevice? SelectedAndroidDevice
+    {
+        get
+        {
+            if (androidDeviceDropDown == null || androidDevices.Count == 0)
+                return null;
+            var selected = androidDeviceDropDown.GetSelected();
+            if (selected == Gtk.Constants.INVALID_LIST_POSITION || selected >= androidDevices.Count)
+                return null;
+            var device = androidDevices[(int) selected];
+            return device.IsReady ? device : null;
+        }
+    }
+
+    // The user picking a device from the drop-down is a DELIBERATE choice and
+    // is remembered; the code selecting one on their behalf is not, and is
+    // filtered out by settingAndroidSelection before it reaches here.
+    void OnAndroidDeviceChosen()
+    {
+        if (androidDeviceDropDown == null)
+            return;
+        var selected = androidDeviceDropDown.GetSelected();
+        if (selected == Gtk.Constants.INVALID_LIST_POSITION || selected >= androidDevices.Count)
+            return;
+
+        var device = androidDevices[(int) selected];
+        IdePreferences.AndroidDeviceSerial.Value = device.Serial;
+        UpdateLaunchActionsEnabled();
+        ShowStatus($"Android device: {device.DisplayName}");
+    }
+
+    /// <summary>
+    /// Whether a launch is possible right now. An Android startup project
+    /// needs a device to deploy to, so Run and Debug are held disabled until
+    /// adb reports one that is ready.
+    /// </summary>
+    bool CanLaunchStartupProject()
+    {
+        if (IdeApp.CurrentSolution == null)
+            return false;
+        if (IdeApp.GetStartupProject(IdeApp.CurrentSolution) is not { } startup || !startup.IsAndroidProject)
+            return true;
+        return SelectedAndroidDevice != null;
+    }
+
+    /// <summary>
+    /// Re-evaluates Run and Debug together. Both depend on the same
+    /// conditions, and an Android startup project adds one more: a device.
+    /// </summary>
+    void UpdateLaunchActionsEnabled()
+    {
+        runAction?.SetEnabled(!frameBufferEmulationRunning && CanLaunchStartupProject());
+        UpdateDebugActionEnabled();
+    }
+
     // While the emulated application is "running", Stop is available and
     // Run/Debug are not — the same shape as a launched head.
     void SetFrameBufferEmulationRunning(bool running)
     {
         frameBufferEmulationRunning = running;
         stopAction?.SetEnabled(running);
-        runAction?.SetEnabled(!running && IdeApp.CurrentSolution != null);
-        UpdateDebugActionEnabled();
+        UpdateLaunchActionsEnabled();
     }
 
     // The Debug action is two commands wearing one button: it STARTS a session
@@ -1529,7 +1761,7 @@ public class Workbench
     // got Continue for free.
     void UpdateDebugActionEnabled() =>
         debugAction?.SetEnabled(DebugService.IsPaused
-            || (!frameBufferEmulationRunning && IdeApp.CurrentSolution != null));
+            || (!frameBufferEmulationRunning && CanLaunchStartupProject()));
 
     // The remembered emulator size, seeding the orientation-independent keys from
     // the width/height pair they replaced the first time an older stored size is
@@ -1783,9 +2015,36 @@ public class Workbench
         ShowStatus($"Running {project.Name}…");
         stopAction?.SetEnabled(true);
         runCancellation = new CancellationTokenSource();
+
+        // An Android run puts the app on a device. Remember what to stop, and
+        // watch the output for which device the Android targets picked — that
+        // announcement is the only authoritative statement of the choice.
+        Action<string>? deviceSerialWatcher = null;
+        string[]? runArguments = null;
+        if (project.IsAndroidProject)
+        {
+            runningAndroidApplicationId =
+                string.IsNullOrEmpty(project.ApplicationId) ? null : project.ApplicationId;
+            // The device chosen in the toolbar is the device deployed to. Left
+            // to itself the Android tooling picks one, and picks arbitrarily
+            // when several are attached — which would make the picker a lie.
+            var chosen = SelectedAndroidDevice;
+            runningAndroidDeviceSerial = chosen?.Serial;
+            if (chosen != null)
+                runArguments = new[] { "--device", chosen.Serial };
+            // Still watch the output: it confirms where the app actually went,
+            // and is the only source when no device was pinned.
+            deviceSerialWatcher = line =>
+            {
+                if (AndroidDebugBridge.ParseDeviceSerial(line) is { } serial)
+                    runningAndroidDeviceSerial = serial;
+            };
+            runService.OutputReceived += deviceSerialWatcher;
+        }
+
         try
         {
-            var exitCode = await runService.RunAsync(project, runCancellation.Token);
+            var exitCode = await runService.RunAsync(project, runArguments, runCancellation.Token);
             ShowStatus($"{project.Name} exited with code {exitCode}");
         }
         catch (Exception ex)
@@ -1795,9 +2054,36 @@ public class Workbench
         }
         finally
         {
+            if (deviceSerialWatcher != null)
+                runService.OutputReceived -= deviceSerialWatcher;
+            runningAndroidApplicationId = null;
+            runningAndroidDeviceSerial = null;
             runCancellation.Dispose();
             runCancellation = null;
             DisableStopUnlessEmulating();
+        }
+    }
+
+    /// <summary>
+    /// Stops an Android app that a run started on a device. The local
+    /// "dotnet run" is not its parent — it installed the app, started it and
+    /// then followed logcat — so the device has to be told separately, or the
+    /// app carries on running after Stop.
+    /// </summary>
+    async Task StopAndroidAppOnDeviceAsync(string applicationId, string? deviceSerial)
+    {
+        ShowStatus($"Stopping {applicationId} on the device…");
+        try
+        {
+            var stopped = await AndroidDebugBridge.ForceStopAsync(applicationId, deviceSerial);
+            ShowStatus(stopped
+                ? $"Stopped {applicationId} on the device"
+                : $"Could not stop {applicationId} on the device — see the Application output");
+        }
+        catch (Exception ex)
+        {
+            LoggingService.LogError("Stopping the app on the device failed", ex);
+            ShowStatus($"Could not stop the app on the device: {ex.Message}");
         }
     }
 
@@ -2254,6 +2540,7 @@ public class Workbench
                      openSolutionFolderAction, openSolutionTerminalAction })
             action?.SetEnabled(false);
         SetTestActionsEnabled(false);
+        UpdateAndroidDeviceSection();
         UpdateWindowTitle();
         IdePreferences.LastSolution.Value = "";
         IdePreferences.StartupProject.Value = "";
@@ -2747,6 +3034,7 @@ public class Workbench
 
         IdePreferences.StartupProject.Value = (string) head.FileName;
         solutionPad.RefreshStartupProject();
+        UpdateAndroidDeviceSection();
         if (IdeApp.GetStartupProject(solution) is { } startup)
             ShowStatus($"Set {startup.Name} as the startup project for the FrameBuffer device.");
     }

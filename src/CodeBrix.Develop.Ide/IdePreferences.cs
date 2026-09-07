@@ -54,6 +54,16 @@ public static class IdePreferences
         ConfigurationProperty.Create(OptionsStore.AutoBackupRetentionKey, OptionsStore.DefaultAutoBackupRetention);
 
     /// <summary>
+    /// The serial of the Android device the user picked in the toolbar, or ""
+    /// while they never have. A DELIBERATE choice: it outranks "whatever was
+    /// seen first" whenever that device is attached, and is ignored (without
+    /// being forgotten) while it is not — unplugging a phone for an afternoon
+    /// must not silently repoint the next run at some other device forever.
+    /// </summary>
+    public static readonly ConfigurationProperty<string> AndroidDeviceSerial =
+        ConfigurationProperty.Create("CodeBrix.Develop.Ide.AndroidDeviceSerial", "");
+
+    /// <summary>
     /// The full path of the last solution the user worked on, reopened on
     /// the next start; "" when no solution was open when the application
     /// closed (the next start then shows the New Application experience).

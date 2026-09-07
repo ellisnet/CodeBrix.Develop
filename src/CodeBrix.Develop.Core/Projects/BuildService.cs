@@ -111,7 +111,26 @@ public class BuildService
     /// Starts "dotnet run" for the given project, streaming its output.
     /// Returns the exit code when the application terminates.
     /// </summary>
-    public async Task<int> RunAsync(DotNetProject project, CancellationToken cancellationToken = default)
+    public Task<int> RunAsync(DotNetProject project, CancellationToken cancellationToken = default)
+        => RunAsync(project, null, cancellationToken);
+
+    /// <summary>
+    /// Starts "dotnet run" for the given project with extra command-line
+    /// arguments, streaming its output. Returns the exit code when the
+    /// application terminates.
+    /// </summary>
+    /// <param name="additionalArguments">
+    /// Arguments appended after "--project &lt;path&gt;", or null for none.
+    /// An Android launch passes "--device &lt;serial&gt;" here: with more than
+    /// one device attached the SDK refuses to guess ("Unable to run this
+    /// project because multiple devices are available"), and without it the
+    /// device picker in the toolbar would not actually decide anything.
+    /// NOTE this is a dotnet-run OPTION, not the MSBuild AdbTarget property
+    /// that the build/Install path uses — "dotnet run -p:AdbTarget=…" does
+    /// not select a device.
+    /// </param>
+    public async Task<int> RunAsync(DotNetProject project,
+        IReadOnlyList<string> additionalArguments, CancellationToken cancellationToken = default)
     {
         var startInfo = new ProcessStartInfo("dotnet")
         {
@@ -123,8 +142,13 @@ public class BuildService
         startInfo.ArgumentList.Add("run");
         startInfo.ArgumentList.Add("--project");
         startInfo.ArgumentList.Add(project.FileName);
+        if (additionalArguments != null)
+        {
+            foreach (var argument in additionalArguments)
+                startInfo.ArgumentList.Add(argument);
+        }
 
-        OutputReceived?.Invoke($"dotnet run --project {project.FileName}");
+        OutputReceived?.Invoke($"dotnet {string.Join(' ', startInfo.ArgumentList)}");
         var exitCode = await RunProcessAsync(startInfo, line => OutputReceived?.Invoke(line), cancellationToken).ConfigureAwait(false);
         OutputReceived?.Invoke($"The application exited with code {exitCode}.");
         return exitCode;

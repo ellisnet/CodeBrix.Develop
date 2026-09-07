@@ -24,6 +24,10 @@
          (see THIRD-PARTY-NOTICES.txt; the LGPL text is the COPYING file
          beside the images). Looked up at run time by ImageService. -->
     <EmbeddedResource Include="Assets\MonoDevelopIcons\*.png" LogicalName="icons/%(Filename)%(Extension)" />
+    <!-- CodeBrix-authored icons (MIT), kept apart from the MonoDevelop set so the
+         licences never mix. Same logical prefix, so ImageService resolves both
+         through one name space. -->
+    <EmbeddedResource Include="Assets\CodeBrixIcons\*.png" LogicalName="icons/%(Filename)%(Extension)" />
   </ItemGroup>
 
   <ItemGroup>
