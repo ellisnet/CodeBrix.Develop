@@ -25,10 +25,10 @@
     "dotnet publish -r <other>" would still get the host-arch debugger.
   -->
   <ItemGroup Condition="'$(NETCoreSdkRuntimeIdentifier)' == 'linux-x64'">
-    <PackageReference Include="CodeBrix.Develop.Debug.LinuxX64" Version="3.0.187.134" />
+    <PackageReference Include="CodeBrix.Develop.Debug.LinuxX64" Version="3.0.250.99" />
   </ItemGroup>
   <ItemGroup Condition="'$(NETCoreSdkRuntimeIdentifier)' == 'linux-arm64'">
-    <PackageReference Include="CodeBrix.Develop.Debug.LinuxArm64" Version="3.0.187.976" />
+    <PackageReference Include="CodeBrix.Develop.Debug.LinuxArm64" Version="3.0.250.100" />
   </ItemGroup>
 
 </Project>

@@ -1,0 +1,9 @@
+{
+  "//": "This file exists to opt 'dotnet test' into the Microsoft.Testing.Platform (MTP) runner.",
+  "//_why": "The test projects under tests/ run on MTP rather than VSTest, matching the CodeBrix family test convention.",
+  "//_history": "Through MTP v1 this was expressed only by MSBuild properties in the test .csproj files. From MTP v2 on the .NET 10 SDK (pulled in by xunit.v3 4.0.0), driving MTP through the old VSTest MSBuild target is a hard error ('Testing with VSTest target is no longer supported by Microsoft.Testing.Platform on .NET 10 SDK and later'), and the supported opt-in moved here. See https://aka.ms/dotnet-test-mtp-error",
+  "//_scope": "Keep this at the repository root so it covers every test project in the repo. It deliberately does NOT pin an SDK version - adding an 'sdk' section here would constrain which .NET SDK builds this repo, which is not the intent.",
+  "test": {
+    "runner": "Microsoft.Testing.Platform"
+  }
+}
