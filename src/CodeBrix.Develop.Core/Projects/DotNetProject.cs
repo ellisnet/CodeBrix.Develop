@@ -320,13 +320,10 @@ public class DotNetProject
     /// </summary>
     public async Task<Dictionary<string, string>> EvaluatePropertiesAsync(string configuration, CancellationToken cancellationToken, params string[] propertyNames)
     {
-        var startInfo = new ProcessStartInfo("dotnet")
-        {
-            WorkingDirectory = BaseDirectory,
-            RedirectStandardOutput = true,
-            RedirectStandardError = true,
-            UseShellExecute = false,
-        };
+        // The same SDK, and the same clean environment, as a build of this
+        // project: evaluated by a different MSBuild the answers would be for
+        // a different project.
+        var startInfo = DotNetCli.CreateStartInfo(FileName, BaseDirectory);
         startInfo.ArgumentList.Add("msbuild");
         startInfo.ArgumentList.Add(FileName);
         startInfo.ArgumentList.Add("-nologo");

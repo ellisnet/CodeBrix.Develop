@@ -219,10 +219,12 @@ public class Workbench
         bottomNotebook.AppendPage(ideLog.Widget, Gtk.Label.New("IDE Log"));
         bottomNotebook.SetVexpand(false);
 
-        // Every project is built and run with an SDK that can actually build
-        // its target framework, not simply whatever is first on PATH.
-        buildService.SdkForTarget = ResolveSdkForTarget;
-        runService.SdkForTarget = ResolveSdkForTarget;
+        // Every dotnet the IDE starts — build, run, restore, the test runner's
+        // builds, project-property evaluation — uses an SDK that can actually
+        // build the solution's target frameworks, not simply whatever is first
+        // on PATH; and none of them inherits the MSBuild registration the type
+        // system makes in this process (DotNetCli explains why that matters).
+        DotNetCli.SdkForTarget = ResolveSdkForTarget;
         buildService.OutputReceived += line => uiContext.Post(_ => buildOutput.AppendLine(line), null);
         runService.OutputReceived += line => uiContext.Post(_ => applicationOutput.AppendLine(line), null);
         AndroidDebugBridge.OutputReceived += line => uiContext.Post(_ => applicationOutput.AppendLine(line), null);

@@ -25,9 +25,9 @@ public class BuildService
     public event Action<string> OutputReceived;
 
     /// <summary>
-    /// Chooses the .NET SDK for a build target, or null to use whatever
-    /// "dotnet" resolves to on PATH (the behaviour before any additional SDK
-    /// was configured). Set by the IDE; a project targeting a newer .NET than
+    /// Chooses the .NET SDK for a build target for THIS service, overriding
+    /// the IDE-wide <see cref="DotNetCli.SdkForTarget"/>; null (the default)
+    /// defers to that shared choice. A project targeting a newer .NET than
     /// the system SDK is built with the installation that can actually build
     /// it, rather than failing with a misleading "target platform identifier
     /// ... was not recognized".
@@ -35,20 +35,16 @@ public class BuildService
     public Func<FilePath, DotNetSdkInstallation> SdkForTarget { get; set; }
 
     /// <summary>
-    /// Applies the chosen SDK to a process: the executable to run, and
-    /// DOTNET_ROOT so a side-by-side installation resolves its own packs
-    /// instead of the system one's. Returns the command name for the echoed
-    /// command line.
+    /// Applies the chosen SDK to a process through <see cref="DotNetCli"/>:
+    /// the executable to run, DOTNET_ROOT so a side-by-side installation
+    /// resolves its own packs, and an environment free of this process's
+    /// MSBuild registration. Returns the command name for the echoed command
+    /// line.
     /// </summary>
-    string ApplySdk(ProcessStartInfo startInfo, FilePath target)
+    internal string ApplySdk(ProcessStartInfo startInfo, FilePath target)
     {
-        var sdk = SdkForTarget?.Invoke(target);
-        if (sdk == null)
-            return "dotnet";
-        startInfo.FileName = sdk.DotnetPath;
-        if (sdk.Root.Length > 0)
-            startInfo.EnvironmentVariables["DOTNET_ROOT"] = sdk.Root;
-        return sdk.DotnetPath;
+        var sdk = (SdkForTarget ?? DotNetCli.SdkForTarget)?.Invoke(target);
+        return DotNetCli.ApplySdk(startInfo, sdk);
     }
 
     /// <summary>Whether a build or run operation is currently in progress.</summary>
