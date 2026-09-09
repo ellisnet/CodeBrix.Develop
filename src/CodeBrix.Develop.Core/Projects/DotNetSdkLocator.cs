@@ -35,7 +35,8 @@ public sealed class DotNetSdkInstallation
     }
 
     /// <summary>
-    /// Whether that SDK version is a PREVIEW ("11.0.100-preview.7.26381.103").
+    /// Whether that SDK version is a PRERELEASE — a preview or a release
+    /// candidate ("11.0.100-rc.1.26425.128").
     /// Previews are used only when the user has allowed them, because
     /// registering a preview MSBuild affects every solution the IDE opens
     /// afterwards, stable ones included.
@@ -58,7 +59,7 @@ public sealed class DotNetSdkInstallation
     /// </summary>
     public string Root { get; }
 
-    /// <summary>Each SDK version's own directory, e.g. "/usr/share/dotnet/sdk/10.0.400".</summary>
+    /// <summary>Each SDK version's own directory, e.g. "/usr/share/dotnet/sdk/10.0.401".</summary>
     public IReadOnlyDictionary<Version, string> SdkDirectories { get; }
 
     /// <summary>
@@ -127,8 +128,8 @@ public sealed class DotNetSdkInstallation
 /// </remarks>
 public sealed class DotNetSdkLocator
 {
-    // "10.0.400 [/usr/share/dotnet/sdk]" and
-    // "11.0.100-preview.7.26381.103 [/home/jeremy/dotnet11/sdk]"
+    // "10.0.401 [/usr/share/dotnet/sdk]" and
+    // "11.0.100-rc.1.26425.128 [/home/jeremy/dotnet11/sdk]"
     static readonly Regex sdkLine = new Regex(
         @"^(?<version>\d+\.\d+\.\d+)(?<prerelease>-[^\s]+)?\s+\[(?<dir>[^\]]+)\]",
         RegexOptions.Compiled);
@@ -249,7 +250,7 @@ public sealed class DotNetSdkLocator
             if (versions.Count == 0)
                 continue;
             // The root is the grandparent of an SDK directory
-            // (/usr/share/dotnet/sdk/10.0.400 -> /usr/share/dotnet). Knowing it
+            // (/usr/share/dotnet/sdk/10.0.401 -> /usr/share/dotnet). Knowing it
             // matters because switching solutions sets DOTNET_ROOT explicitly,
             // including back to the system one.
             var root = "";
@@ -297,7 +298,7 @@ public sealed class DotNetSdkLocator
             foreach (var line in output.Split('\n'))
             {
                 var match = sdkLine.Match(line.Trim());
-                // The prerelease suffix is dropped deliberately: 11.0.100-preview.7
+                // The prerelease suffix is dropped deliberately: 11.0.100-rc.1
                 // provides .NET 11 for our purposes, and Version cannot parse it.
                 if (!match.Success || !Version.TryParse(match.Groups["version"].Value, out var version))
                     continue;

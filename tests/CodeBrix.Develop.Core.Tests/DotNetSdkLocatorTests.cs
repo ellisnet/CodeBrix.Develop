@@ -79,10 +79,10 @@ public class DotNetSdkLocatorTests
     [Fact]
     public void Provides_matches_on_the_major_version_only()
     {
-        // A 10.0.400 SDK builds net10.0 and net10.0-android alike; it does not
+        // A 10.0.401 SDK builds net10.0 and net10.0-android alike; it does not
         // build net11.0.
         var installation = new DotNetSdkInstallation("/x/dotnet", "/x",
-            new List<Version> { new Version(10, 0, 400) });
+            new List<Version> { new Version(10, 0, 401) });
 
         installation.Provides(new Version(10, 0)).Should().BeTrue();
         installation.Provides(new Version(11, 0)).Should().BeFalse();
@@ -131,7 +131,7 @@ public class DotNetSdkLocatorTests
         // The whole point of the "Allow preview MSBuild" setting: a .NET 11
         // project served only by a preview SDK resolves to nothing until the
         // user opts in.
-        var stable = new Version(10, 0, 400);
+        var stable = new Version(10, 0, 401);
         var preview = new Version(11, 0, 100);
         var installation = new DotNetSdkInstallation("dotnet", "/x",
             new List<Version> { stable, preview }, sdkDirectories: null,
@@ -148,40 +148,40 @@ public class DotNetSdkLocatorTests
     {
         var preview = new Version(11, 0, 100);
         var installation = new DotNetSdkInstallation("dotnet", "/x",
-            new List<Version> { new Version(10, 0, 400), preview },
+            new List<Version> { new Version(10, 0, 401), preview },
             prerelease: new[] { preview });
 
         installation.IsPrerelease(preview).Should().BeTrue();
-        installation.IsPrerelease(new Version(10, 0, 400)).Should().BeFalse();
+        installation.IsPrerelease(new Version(10, 0, 401)).Should().BeFalse();
         installation.StableSdkVersions.Should().ContainSingle()
-            .Which.Should().Be(new Version(10, 0, 400));
+            .Which.Should().Be(new Version(10, 0, 401));
     }
 
     [Fact]
     public void The_newest_stable_sdk_directory_skips_a_preview()
     {
-        var stable = new Version(10, 0, 400);
+        var stable = new Version(10, 0, 401);
         var preview = new Version(11, 0, 100);
         var installation = new DotNetSdkInstallation("dotnet", "/x",
             new List<Version> { stable, preview },
             sdkDirectories: new Dictionary<Version, string>
             {
-                [stable] = "/x/sdk/10.0.400",
-                [preview] = "/x/sdk/11.0.100-preview.7",
+                [stable] = "/x/sdk/10.0.401",
+                [preview] = "/x/sdk/11.0.100-rc.1",
             },
             prerelease: new[] { preview });
 
         // This is the directory MSBuildLocator is pointed at, so getting it
         // wrong is exactly the "preview MSBuild under stable work" the setting
         // exists to prevent.
-        installation.NewestSdkDirectoryFor(allowPrerelease: true).Should().Be("/x/sdk/11.0.100-preview.7");
-        installation.NewestSdkDirectoryFor(allowPrerelease: false).Should().Be("/x/sdk/10.0.400");
+        installation.NewestSdkDirectoryFor(allowPrerelease: true).Should().Be("/x/sdk/11.0.100-rc.1");
+        installation.NewestSdkDirectoryFor(allowPrerelease: false).Should().Be("/x/sdk/10.0.401");
     }
 
     [Fact]
     public void A_real_preview_sdk_is_detected_as_prerelease()
     {
-        // The isolated .NET 11 preview on this machine, if it is installed —
+        // The isolated .NET 11 prerelease on this machine, if it is installed —
         // proves the "--list-sdks" prerelease suffix is actually parsed.
         var locator = new DotNetSdkLocator(new[] { "~/dotnet11" });
         var extra = locator.Installations.FirstOrDefault(i => !i.IsSystemInstallation);
@@ -189,7 +189,7 @@ public class DotNetSdkLocatorTests
             return; // not installed on this machine; nothing to assert
 
         extra.SdkVersions.Should().NotBeEmpty();
-        extra.StableSdkVersions.Should().BeEmpty("the installed .NET 11 SDK is a preview");
+        extra.StableSdkVersions.Should().BeEmpty("the installed .NET 11 SDK is a prerelease");
         locator.NeedsPrerelease(new Version(11, 0)).Should().BeTrue();
         locator.Resolve(new Version(11, 0), allowPrerelease: false).Should().BeNull();
         locator.Resolve(new Version(11, 0), allowPrerelease: true).Should().NotBeNull();

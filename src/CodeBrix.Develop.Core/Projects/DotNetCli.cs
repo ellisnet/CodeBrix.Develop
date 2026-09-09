@@ -26,7 +26,7 @@ namespace CodeBrix.Develop.Core.Projects;
 /// MSBuildExtensionsPath and MSBuildSDKsPath into the process environment.</item>
 /// <item>Every child process inherits that environment, and the dotnet CLI
 /// HONORS those variables over its own SDK. A .NET 10 CLI handed a .NET 11
-/// preview's MSBuild loads that preview's SDK resolvers into a .NET 10
+/// prerelease's MSBuild loads that prerelease's SDK resolvers into a .NET 10
 /// runtime and dies with "SDK Resolver Failure ... Could not load file or
 /// assembly 'System.Runtime, Version=11.0.0.0'" — on a net10.0-android
 /// project the .NET 10 SDK builds perfectly well on its own. Any ONE of the

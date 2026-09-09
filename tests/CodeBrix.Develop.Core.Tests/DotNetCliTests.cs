@@ -23,7 +23,7 @@ public sealed class ProcessEnvironmentCollection
 /// <summary>
 /// The seam every child dotnet goes through. The MSBuild registration the
 /// type system makes in THIS process must never reach a child, or a .NET 10
-/// CLI ends up running a .NET 11 preview's MSBuild — which is exactly how a
+/// CLI ends up running a .NET 11 prerelease's MSBuild — which is exactly how a
 /// net10.0-android project failed to build while a net11.0 one succeeded.
 /// </summary>
 [Collection(ProcessEnvironmentCollection.Name)]
@@ -73,7 +73,7 @@ public class DotNetCliTests : IDisposable
     [Fact]
     public void ApplySdk_removes_this_process_MSBuild_registration_from_the_child()
     {
-        RegisterForeignMSBuild("/somewhere/dotnet11/sdk/11.0.100-preview.7");
+        RegisterForeignMSBuild("/somewhere/dotnet11/sdk/11.0.100-rc.1");
         var startInfo = new ProcessStartInfo("dotnet");
         // A fresh start info begins as a copy of this process's environment.
         startInfo.Environment.ContainsKey("MSBuildSDKsPath").Should().BeTrue();
@@ -87,7 +87,7 @@ public class DotNetCliTests : IDisposable
     [Fact]
     public void ApplySdk_removes_the_registration_even_when_an_sdk_is_applied()
     {
-        RegisterForeignMSBuild("/somewhere/dotnet11/sdk/11.0.100-preview.7");
+        RegisterForeignMSBuild("/somewhere/dotnet11/sdk/11.0.100-rc.1");
         var startInfo = new ProcessStartInfo("dotnet");
 
         DotNetCli.ApplySdk(startInfo, Installation("/opt/dotnet11/dotnet", "/opt/dotnet11"));
@@ -162,7 +162,7 @@ public class DotNetCliTests : IDisposable
     public void CreateStartInfo_without_a_choice_uses_dotnet_from_PATH()
     {
         DotNetCli.SdkForTarget = null;
-        RegisterForeignMSBuild("/somewhere/dotnet11/sdk/11.0.100-preview.7");
+        RegisterForeignMSBuild("/somewhere/dotnet11/sdk/11.0.100-rc.1");
 
         var startInfo = DotNetCli.CreateStartInfo(new FilePath("/work/App.csproj"), new FilePath("/work"));
 
@@ -203,7 +203,7 @@ public class DotNetCliTests : IDisposable
     public void A_build_service_with_no_choice_at_all_strips_the_registration_and_uses_PATH()
     {
         DotNetCli.SdkForTarget = null;
-        RegisterForeignMSBuild("/somewhere/dotnet11/sdk/11.0.100-preview.7");
+        RegisterForeignMSBuild("/somewhere/dotnet11/sdk/11.0.100-rc.1");
         var service = new BuildService();
         var startInfo = new ProcessStartInfo("dotnet");
 
