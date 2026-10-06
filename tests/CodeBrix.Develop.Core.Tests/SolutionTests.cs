@@ -54,7 +54,7 @@ public class SolutionTests : IDisposable
             <Project Sdk="Microsoft.NET.Sdk">
               <ItemGroup>
                 <PackageReference Include="codebrix.platform.apachelicenseforever" Version="1.0.186.1273" />
-                <PackageReference Include="SkiaSharp.Skottie" Version="4.151.0" />
+                <PackageReference Include="SkiaSharp.Skottie" Version="4.153.1" />
               </ItemGroup>
             </Project>
             """);
@@ -87,7 +87,7 @@ public class SolutionTests : IDisposable
                 <TargetFramework>net10.0</TargetFramework>
               </PropertyGroup>
               <ItemGroup>
-                <PackageReference Include="SkiaSharp.Skottie" Version="4.151.0" />
+                <PackageReference Include="SkiaSharp.Skottie" Version="4.153.1" />
               </ItemGroup>
               <ItemGroup>
                 <ProjectReference Include="..\..\..\..\src\Platform.UI\Platform.UI.Skia.csproj" />

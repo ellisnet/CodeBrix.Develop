@@ -22,7 +22,7 @@ public class PackageReferenceRewriterTests
               <ItemGroup>
                 <!-- the platform -->
                 <PackageReference Include="CodeBrix.Platform.ApacheLicenseForever" Version="1.0.186.1273" />
-                <PackageReference Include="SkiaSharp.Skottie" Version="4.151.0" />
+                <PackageReference Include="SkiaSharp.Skottie" Version="4.153.1" />
               </ItemGroup>
             </Project>
             """;

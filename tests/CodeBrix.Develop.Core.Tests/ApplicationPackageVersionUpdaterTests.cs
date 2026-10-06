@@ -9,8 +9,8 @@ namespace CodeBrix.Develop.Core.Tests;
 public class ApplicationPackageVersionUpdaterTests
 {
     const string PlatformVersion = "1.0.201.336";
-    const string SkiaVersion = "4.151.0";
-    const string HarfBuzzVersion = "14.2.1.1";
+    const string SkiaVersion = "4.153.1";
+    const string HarfBuzzVersion = "14.2.1.301";
 
     static IReadOnlyDictionary<string, string> Latest(params (string Id, string Version)[] entries)
     {
@@ -44,9 +44,9 @@ public class ApplicationPackageVersionUpdaterTests
     {
         //Arrange — SkiaSharp has shipped a version CodeBrix.Platform has not adopted.
         var latest = Latest(
-            ("SkiaSharp", "4.151.0"),
-            ("SkiaSharp.HarfBuzz", "4.151.0"),
-            ("SkiaSharp.NativeAssets.Linux", "4.151.0"));
+            ("SkiaSharp", "4.153.1"),
+            ("SkiaSharp.HarfBuzz", "4.153.1"),
+            ("SkiaSharp.NativeAssets.Linux", "4.153.1"));
 
         //Act
         var result = ApplicationPackageVersionUpdater.ApplyCeilings(
@@ -82,7 +82,7 @@ public class ApplicationPackageVersionUpdaterTests
         // the dependency "HarfbuzzSharp"; NuGet ids are case-insensitive.
         var latest = Latest(
             ("harfbuzzsharp", "15.0.0"),
-            ("skiasharp.nativeassets.linux", "4.151.0"),
+            ("skiasharp.nativeassets.linux", "4.153.1"),
             ("codebrix.platform.apachelicenseforever", "1.0.202.900"));
 
         //Act
@@ -138,7 +138,7 @@ public class ApplicationPackageVersionUpdaterTests
     public void An_absent_ceiling_leaves_the_latest_version_alone()
     {
         //Arrange — no generated head declared a HarfBuzzSharp dependency.
-        var latest = Latest(("HarfBuzzSharp", "15.0.0"), ("SkiaSharp", "4.151.0"));
+        var latest = Latest(("HarfBuzzSharp", "15.0.0"), ("SkiaSharp", "4.153.1"));
 
         //Act
         var result = ApplicationPackageVersionUpdater.ApplyCeilings(
